@@ -59,17 +59,40 @@ function useViewport() {
   useEffect(() => {
     const update = () => setVp({ w: window.innerWidth, h: window.innerHeight });
     window.addEventListener('resize', update);
-    return () => window.removeEventListener('resize', update);
+    window.addEventListener('orientationchange', update);
+    return () => {
+      window.removeEventListener('resize', update);
+      window.removeEventListener('orientationchange', update);
+    };
   }, []);
   return vp;
 }
 
+function getUrlParams() {
+  const params = new URLSearchParams(window.location.search);
+  return {
+    image: params.get('img') ?? null,
+    pieces: parseInt(params.get('pieces') ?? '0', 10) || null,
+    autostart: params.get('autostart') === '1',
+    admin: params.get('admin') === '1',
+  };
+}
+
 export default function PuzzleGame() {
-  const [imageUrl, setImageUrl] = useState<string | null>(null);
-  const [selectedSampleId, setSelectedSampleId] = useState<string | null>(null);
+  const urlParams = useRef(getUrlParams());
+
+  const [imageUrl, setImageUrl] = useState<string | null>(urlParams.current.image);
+  const [selectedSampleId, setSelectedSampleId] = useState<string | null>(() => {
+    if (urlParams.current.image) {
+      const match = SAMPLE_IMAGES.find(s => s.url === urlParams.current.image);
+      return match?.id ?? null;
+    }
+    return null;
+  });
   const [pieces, setPieces] = useState<PuzzlePiece[]>([]);
   const [config, setConfig] = useState<PuzzleConfig | null>(null);
-  const [selectedPieceCount, setSelectedPieceCount] = useState(9);
+  const [trayHeight, setTrayHeight] = useState(0);
+  const [selectedPieceCount, setSelectedPieceCount] = useState(urlParams.current.pieces ?? 9);
   const [gameStarted, setGameStarted] = useState(false);
   const [isComplete, setIsComplete] = useState(false);
   const [snappingPieceId, setSnappingPieceId] = useState<number | null>(null);
@@ -83,15 +106,26 @@ export default function PuzzleGame() {
   const [showQr, setShowQr] = useState(false);
   const [copied, setCopied] = useState(false);
 
-  const vp = useViewport();
-  const isMobile = vp.w < 768;
-  const isLandscape = vp.w > vp.h;
+  // Admin link generator state
+  const [showAdmin, setShowAdmin] = useState(urlParams.current.admin);
+  const [adminImageUrl, setAdminImageUrl] = useState('');
+  const [adminSampleId, setAdminSampleId] = useState<string | null>(null);
+  const [adminPieces, setAdminPieces] = useState(9);
+  const [adminLink, setAdminLink] = useState('');
+  const [adminLinkCopied, setAdminLinkCopied] = useState(false);
 
-  const boardScale = Math.min(
-    (vp.w - 32) / BOARD_WIDTH,
-    (vp.h - (isMobile ? 170 : 200)) / BOARD_HEIGHT,
-    1
-  );
+  const vp = useViewport();
+  const isPortrait = vp.h > vp.w;
+  const HEADER_H = 48;
+
+  const totalPlayH = BOARD_HEIGHT + trayHeight;
+  const boardScale = gameStarted && config
+    ? Math.min(
+        (vp.w - 16) / BOARD_WIDTH,
+        (vp.h - HEADER_H - 8) / totalPlayH,
+        1
+      )
+    : 1;
 
   const shareUrl = typeof window !== 'undefined' ? window.location.origin + window.location.pathname : '';
 
@@ -138,17 +172,30 @@ export default function PuzzleGame() {
     if (file && file.type.startsWith('image/')) handleImageUpload(file);
   }, [handleImageUpload]);
 
-  const startGame = useCallback(() => {
-    if (!imageUrl) return;
-    const cfg = calculateGrid(selectedPieceCount, BOARD_WIDTH, BOARD_HEIGHT);
-    const newPieces = createPieces(cfg, BOARD_WIDTH, BOARD_HEIGHT);
+  const startGame = useCallback((imgUrl?: string, pieceCount?: number) => {
+    const url = imgUrl ?? imageUrl;
+    const count = pieceCount ?? selectedPieceCount;
+    if (!url) return;
+    const cfg = calculateGrid(count, BOARD_WIDTH, BOARD_HEIGHT);
+    const { pieces: newPieces, trayHeight: newTrayH } = createPieces(cfg, BOARD_WIDTH, BOARD_HEIGHT);
     setConfig(cfg);
     setPieces(newPieces);
+    setTrayHeight(newTrayH);
     setGameStarted(true);
     setIsComplete(false);
     setCompletedCount(0);
+    if (imgUrl) setImageUrl(imgUrl);
     startTimer();
   }, [imageUrl, selectedPieceCount, startTimer]);
+
+  // Auto-start from URL params
+  useEffect(() => {
+    const { image, pieces: p, autostart } = urlParams.current;
+    if (image && autostart) {
+      startGame(image, p ?? 9);
+    }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   const handleComplete = useCallback(() => {
     const elapsed = Math.floor((Date.now() - startTimeRef.current) / 1000);
@@ -176,6 +223,24 @@ export default function PuzzleGame() {
     setCompletedCount(placed);
   }, [pieces]);
 
+  // Admin link generation
+  const generateAdminLink = useCallback(() => {
+    const imgUrl = adminSampleId
+      ? SAMPLE_IMAGES.find(s => s.id === adminSampleId)?.url ?? adminImageUrl
+      : adminImageUrl;
+    if (!imgUrl) return;
+    const base = window.location.origin + window.location.pathname;
+    const link = `${base}?img=${encodeURIComponent(imgUrl)}&pieces=${adminPieces}&autostart=1`;
+    setAdminLink(link);
+  }, [adminSampleId, adminImageUrl, adminPieces]);
+
+  const copyAdminLink = useCallback(() => {
+    navigator.clipboard.writeText(adminLink).then(() => {
+      setAdminLinkCopied(true);
+      setTimeout(() => setAdminLinkCopied(false), 2000);
+    });
+  }, [adminLink]);
+
   const totalPieces = config?.totalPieces ?? 0;
   const progress = totalPieces > 0 ? (completedCount / totalPieces) * 100 : 0;
 
@@ -188,73 +253,108 @@ export default function PuzzleGame() {
         background: 'linear-gradient(135deg, #0f1223 0%, #1a1035 50%, #0f1223 100%)',
         overflow: 'hidden',
         fontFamily: 'var(--app-font-sans)',
+        position: 'relative',
       }}
     >
-      {/* Header */}
+      {/* ── Portrait mode overlay ── */}
+      {isPortrait && (
+        <div
+          style={{
+            position: 'fixed',
+            inset: 0,
+            zIndex: 99999,
+            background: 'rgba(10,8,25,0.97)',
+            display: 'flex',
+            flexDirection: 'column',
+            alignItems: 'center',
+            justifyContent: 'center',
+            gap: 20,
+            padding: 32,
+            textAlign: 'center',
+          }}
+        >
+          <div
+            style={{
+              fontSize: 64,
+              animation: 'rotateHint 1.8s ease-in-out infinite',
+            }}
+          >
+            📱
+          </div>
+          <div style={{ color: '#e2d9f3', fontSize: 20, fontWeight: 700 }}>가로 모드로 돌려주세요</div>
+          <div style={{ color: 'rgba(255,255,255,0.45)', fontSize: 14, lineHeight: 1.6 }}>
+            퍼즐 게임은 가로 모드에서<br />최적으로 즐길 수 있어요 📐
+          </div>
+          <style>{`
+            @keyframes rotateHint {
+              0%   { transform: rotate(0deg); }
+              30%  { transform: rotate(90deg); }
+              60%  { transform: rotate(90deg); }
+              90%  { transform: rotate(0deg); }
+              100% { transform: rotate(0deg); }
+            }
+          `}</style>
+        </div>
+      )}
+
+      {/* ── Header ── */}
       <div
         style={{
           display: 'flex',
           alignItems: 'center',
-          padding: isMobile ? '8px 12px' : '10px 20px',
+          padding: '0 12px',
+          height: HEADER_H,
           background: 'rgba(15,18,35,0.97)',
           borderBottom: '1px solid rgba(168,85,247,0.3)',
-          backdropFilter: 'blur(10px)',
-          gap: isMobile ? 8 : 16,
+          gap: 10,
           flexShrink: 0,
           zIndex: 100,
-          minHeight: isMobile ? 44 : 52,
         }}
       >
-        {/* Logo */}
-        <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 7 }}>
           <div
             style={{
-              width: isMobile ? 28 : 34,
-              height: isMobile ? 28 : 34,
+              width: 30,
+              height: 30,
               borderRadius: '50%',
               background: 'linear-gradient(135deg, #a855f7, #7c3aed)',
               display: 'flex',
               alignItems: 'center',
               justifyContent: 'center',
-              fontSize: isMobile ? 13 : 16,
+              fontSize: 14,
               boxShadow: '0 0 12px rgba(168,85,247,0.5)',
               flexShrink: 0,
             }}
           >
             🧩
           </div>
-          {!isMobile && (
-            <span style={{ color: '#e2d9f3', fontWeight: 700, fontSize: 16 }}>퍼즐 게임</span>
-          )}
+          <span style={{ color: '#e2d9f3', fontWeight: 700, fontSize: 15, whiteSpace: 'nowrap' }}>퍼즐 게임</span>
         </div>
 
-        {/* Progress + Timer */}
         {gameStarted && !isComplete && (
           <>
-            <div style={{ width: 1, height: 20, background: 'rgba(168,85,247,0.3)', flexShrink: 0 }} />
-            <div style={{ display: 'flex', alignItems: 'center', gap: 8, minWidth: 0 }}>
-              <span style={{ color: 'rgba(168,85,247,0.9)', fontSize: isMobile ? 11 : 13, fontWeight: 600, whiteSpace: 'nowrap' }}>
-                {completedCount}/{totalPieces}
-              </span>
-              <div style={{ width: isMobile ? 60 : 100, height: 5, background: 'rgba(255,255,255,0.1)', borderRadius: 99, overflow: 'hidden', flexShrink: 0 }}>
-                <div
-                  style={{
-                    width: `${progress}%`,
-                    height: '100%',
-                    background: 'linear-gradient(90deg, #7c3aed, #a855f7)',
-                    borderRadius: 99,
-                    transition: 'width 0.3s ease',
-                    boxShadow: '0 0 6px rgba(168,85,247,0.6)',
-                  }}
-                />
-              </div>
+            <div style={{ width: 1, height: 18, background: 'rgba(168,85,247,0.3)', flexShrink: 0 }} />
+            <span style={{ color: 'rgba(168,85,247,0.9)', fontSize: 12, fontWeight: 600, whiteSpace: 'nowrap' }}>
+              {completedCount}/{totalPieces}
+            </span>
+            <div style={{ width: 70, height: 5, background: 'rgba(255,255,255,0.1)', borderRadius: 99, overflow: 'hidden', flexShrink: 0 }}>
+              <div
+                style={{
+                  width: `${progress}%`,
+                  height: '100%',
+                  background: 'linear-gradient(90deg, #7c3aed, #a855f7)',
+                  borderRadius: 99,
+                  transition: 'width 0.3s',
+                  boxShadow: '0 0 6px rgba(168,85,247,0.6)',
+                }}
+              />
             </div>
-            <div style={{ width: 1, height: 20, background: 'rgba(168,85,247,0.3)', flexShrink: 0 }} />
-            <div style={{ display: 'flex', alignItems: 'center', gap: 5 }}>
-              <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="rgba(168,85,247,0.85)" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+            <div style={{ width: 1, height: 18, background: 'rgba(168,85,247,0.3)', flexShrink: 0 }} />
+            <div style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
+              <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="rgba(168,85,247,0.85)" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
                 <circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/>
               </svg>
-              <span style={{ color: 'rgba(192,132,252,0.95)', fontSize: isMobile ? 11 : 13, fontWeight: 700, fontVariantNumeric: 'tabular-nums', whiteSpace: 'nowrap' }}>
+              <span style={{ color: 'rgba(192,132,252,0.95)', fontSize: 12, fontWeight: 700, fontVariantNumeric: 'tabular-nums', whiteSpace: 'nowrap' }}>
                 {formatTime(elapsedSeconds)}
               </span>
             </div>
@@ -263,46 +363,49 @@ export default function PuzzleGame() {
 
         <div style={{ flex: 1 }} />
 
-        {/* Share / QR button (setup screen only) */}
         {!gameStarted && (
-          <button
-            onClick={() => setShowQr(v => !v)}
-            title="모바일로 열기"
-            style={{
-              display: 'flex',
-              alignItems: 'center',
-              gap: 5,
-              padding: isMobile ? '5px 10px' : '6px 12px',
-              background: showQr ? 'rgba(168,85,247,0.25)' : 'rgba(168,85,247,0.1)',
-              border: '1px solid rgba(168,85,247,0.35)',
-              borderRadius: 8,
-              color: '#c084fc',
-              fontSize: isMobile ? 11 : 12,
-              fontWeight: 600,
-              cursor: 'pointer',
-              flexShrink: 0,
-            }}
-          >
-            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round">
-              <rect x="5" y="2" width="14" height="20" rx="2" ry="2"/><line x1="12" y1="18" x2="12.01" y2="18"/>
-            </svg>
-            {!isMobile && '모바일로 열기'}
-          </button>
+          <>
+            <button
+              onClick={() => setShowQr(v => !v)}
+              style={{
+                display: 'flex', alignItems: 'center', gap: 5,
+                padding: '5px 10px',
+                background: showQr ? 'rgba(168,85,247,0.25)' : 'rgba(168,85,247,0.1)',
+                border: '1px solid rgba(168,85,247,0.35)',
+                borderRadius: 7,
+                color: '#c084fc', fontSize: 11, fontWeight: 600, cursor: 'pointer', flexShrink: 0,
+              }}
+            >
+              <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round">
+                <rect x="5" y="2" width="14" height="20" rx="2"/><line x1="12" y1="18" x2="12.01" y2="18"/>
+              </svg>
+              QR
+            </button>
+            <button
+              onClick={() => setShowAdmin(v => !v)}
+              style={{
+                display: 'flex', alignItems: 'center', gap: 5,
+                padding: '5px 10px',
+                background: showAdmin ? 'rgba(168,85,247,0.25)' : 'rgba(168,85,247,0.1)',
+                border: '1px solid rgba(168,85,247,0.35)',
+                borderRadius: 7,
+                color: '#c084fc', fontSize: 11, fontWeight: 600, cursor: 'pointer', flexShrink: 0,
+              }}
+            >
+              ⚙️ 관리자
+            </button>
+          </>
         )}
 
         {gameStarted && (
           <button
             onClick={handleNewGame}
             style={{
-              padding: isMobile ? '5px 10px' : '6px 14px',
+              padding: '5px 12px',
               background: 'rgba(168,85,247,0.15)',
               border: '1px solid rgba(168,85,247,0.4)',
-              borderRadius: 8,
-              color: '#c084fc',
-              fontSize: isMobile ? 11 : 13,
-              fontWeight: 600,
-              cursor: 'pointer',
-              flexShrink: 0,
+              borderRadius: 7,
+              color: '#c084fc', fontSize: 12, fontWeight: 600, cursor: 'pointer', flexShrink: 0,
             }}
           >
             새 게임
@@ -310,153 +413,248 @@ export default function PuzzleGame() {
         )}
       </div>
 
-      {/* QR / Share panel */}
+      {/* ── QR panel ── */}
       {showQr && !gameStarted && (
         <div
           style={{
-            position: 'absolute',
-            top: isMobile ? 50 : 60,
-            right: 12,
-            zIndex: 200,
+            position: 'absolute', top: HEADER_H + 6, right: 12, zIndex: 200,
             background: 'rgba(20,15,40,0.98)',
             border: '1px solid rgba(168,85,247,0.4)',
-            borderRadius: 14,
-            padding: 16,
-            display: 'flex',
-            flexDirection: 'column',
-            alignItems: 'center',
-            gap: 10,
-            boxShadow: '0 8px 32px rgba(0,0,0,0.6)',
-            minWidth: 180,
+            borderRadius: 14, padding: 14,
+            display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 8,
+            boxShadow: '0 8px 32px rgba(0,0,0,0.6)', minWidth: 170,
           }}
         >
-          <span style={{ color: '#c084fc', fontSize: 12, fontWeight: 700, letterSpacing: '0.04em' }}>모바일로 열기</span>
+          <span style={{ color: '#c084fc', fontSize: 11, fontWeight: 700 }}>모바일로 열기</span>
           <img
-            src={`https://api.qrserver.com/v1/create-qr-code/?size=140x140&data=${encodeURIComponent(shareUrl)}&bgcolor=14-09-28&color=a855f7&margin=8`}
-            alt="QR Code"
-            width={140}
-            height={140}
-            style={{ borderRadius: 8, background: '#fff', padding: 4 }}
+            src={`https://api.qrserver.com/v1/create-qr-code/?size=130x130&data=${encodeURIComponent(shareUrl)}&margin=6`}
+            alt="QR" width={130} height={130}
+            style={{ borderRadius: 7, background: '#fff', padding: 3 }}
           />
-          <div style={{ display: 'flex', alignItems: 'center', gap: 6, width: '100%' }}>
-            <div
-              style={{
-                flex: 1,
-                fontSize: 10,
-                color: 'rgba(255,255,255,0.5)',
-                overflow: 'hidden',
-                textOverflow: 'ellipsis',
-                whiteSpace: 'nowrap',
-                background: 'rgba(255,255,255,0.06)',
-                borderRadius: 6,
-                padding: '4px 8px',
-              }}
-            >
-              {shareUrl}
+          <button
+            onClick={handleCopyLink}
+            style={{
+              width: '100%', padding: '5px 0',
+              background: copied ? 'rgba(34,197,94,0.2)' : 'rgba(168,85,247,0.2)',
+              border: `1px solid ${copied ? 'rgba(34,197,94,0.5)' : 'rgba(168,85,247,0.4)'}`,
+              borderRadius: 7, color: copied ? '#4ade80' : '#c084fc',
+              fontSize: 11, fontWeight: 700, cursor: 'pointer',
+            }}
+          >
+            {copied ? '복사됨!' : '링크 복사'}
+          </button>
+        </div>
+      )}
+
+      {/* ── Admin panel ── */}
+      {showAdmin && !gameStarted && (
+        <div
+          style={{
+            position: 'absolute', top: HEADER_H + 6, right: 12, zIndex: 200,
+            background: 'rgba(20,15,40,0.99)',
+            border: '1px solid rgba(168,85,247,0.45)',
+            borderRadius: 14, padding: 18,
+            display: 'flex', flexDirection: 'column', gap: 12,
+            boxShadow: '0 12px 48px rgba(0,0,0,0.7)',
+            width: 300, maxWidth: 'calc(100vw - 24px)',
+          }}
+        >
+          <div style={{ color: '#e2d9f3', fontWeight: 700, fontSize: 13 }}>⚙️ 관리자 링크 생성</div>
+
+          {/* Sample image picker */}
+          <div>
+            <div style={{ color: 'rgba(255,255,255,0.5)', fontSize: 10, fontWeight: 600, marginBottom: 6, letterSpacing: '0.05em' }}>
+              샘플 이미지 선택 (선택사항)
             </div>
-            <button
-              onClick={handleCopyLink}
-              style={{
-                padding: '4px 10px',
-                background: copied ? 'rgba(34,197,94,0.2)' : 'rgba(168,85,247,0.2)',
-                border: `1px solid ${copied ? 'rgba(34,197,94,0.5)' : 'rgba(168,85,247,0.4)'}`,
-                borderRadius: 6,
-                color: copied ? '#4ade80' : '#c084fc',
-                fontSize: 11,
-                fontWeight: 700,
-                cursor: 'pointer',
-                whiteSpace: 'nowrap',
-              }}
-            >
-              {copied ? '복사됨!' : '복사'}
-            </button>
+            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: 5 }}>
+              {SAMPLE_IMAGES.map(img => (
+                <button
+                  key={img.id}
+                  onClick={() => {
+                    setAdminSampleId(img.id === adminSampleId ? null : img.id);
+                    setAdminImageUrl('');
+                    setAdminLink('');
+                  }}
+                  style={{
+                    position: 'relative', padding: 0, border: adminSampleId === img.id
+                      ? '2px solid rgba(168,85,247,0.9)' : '2px solid transparent',
+                    borderRadius: 7, overflow: 'hidden', cursor: 'pointer',
+                    background: 'none', aspectRatio: '5/3',
+                    boxShadow: adminSampleId === img.id ? '0 0 10px rgba(168,85,247,0.4)' : 'none',
+                  }}
+                >
+                  <img src={img.thumb} alt={img.label} crossOrigin="anonymous"
+                    style={{ width: '100%', height: '100%', objectFit: 'cover', display: 'block' }} />
+                  <div style={{
+                    position: 'absolute', inset: 0,
+                    background: 'linear-gradient(to top, rgba(0,0,0,0.55) 0%, transparent 60%)',
+                    display: 'flex', alignItems: 'flex-end', justifyContent: 'center', paddingBottom: 3,
+                  }}>
+                    <span style={{ color: '#fff', fontSize: 9, fontWeight: 600 }}>{img.label}</span>
+                  </div>
+                </button>
+              ))}
+            </div>
           </div>
+
+          {/* Custom image URL */}
+          {!adminSampleId && (
+            <div>
+              <div style={{ color: 'rgba(255,255,255,0.5)', fontSize: 10, fontWeight: 600, marginBottom: 5, letterSpacing: '0.05em' }}>
+                또는 이미지 URL 직접 입력
+              </div>
+              <input
+                type="text"
+                value={adminImageUrl}
+                onChange={e => { setAdminImageUrl(e.target.value); setAdminLink(''); }}
+                placeholder="https://example.com/image.jpg"
+                style={{
+                  width: '100%', padding: '7px 10px', boxSizing: 'border-box',
+                  background: 'rgba(255,255,255,0.06)',
+                  border: '1px solid rgba(168,85,247,0.3)',
+                  borderRadius: 8, color: '#e2d9f3', fontSize: 11,
+                  outline: 'none', fontFamily: 'inherit',
+                }}
+              />
+            </div>
+          )}
+
+          {/* Piece count */}
+          <div>
+            <div style={{ color: 'rgba(255,255,255,0.5)', fontSize: 10, fontWeight: 600, marginBottom: 6, letterSpacing: '0.05em' }}>
+              피스 수 선택
+            </div>
+            <div style={{ display: 'flex', flexWrap: 'wrap', gap: 5 }}>
+              {PIECE_COUNTS.map(count => (
+                <button
+                  key={count}
+                  onClick={() => { setAdminPieces(count); setAdminLink(''); }}
+                  style={{
+                    padding: '4px 10px', borderRadius: 6,
+                    border: adminPieces === count ? '1.5px solid rgba(168,85,247,0.9)' : '1px solid rgba(168,85,247,0.2)',
+                    background: adminPieces === count ? 'rgba(168,85,247,0.25)' : 'rgba(15,18,35,0.6)',
+                    color: adminPieces === count ? '#e2d9f3' : 'rgba(255,255,255,0.45)',
+                    fontWeight: adminPieces === count ? 700 : 500,
+                    fontSize: 11, cursor: 'pointer',
+                  }}
+                >
+                  {count}조각
+                </button>
+              ))}
+            </div>
+          </div>
+
+          {/* Generate button */}
+          <button
+            onClick={generateAdminLink}
+            disabled={!adminSampleId && !adminImageUrl}
+            style={{
+              padding: '9px',
+              background: (adminSampleId || adminImageUrl)
+                ? 'linear-gradient(135deg, #7c3aed, #a855f7)' : 'rgba(100,100,100,0.3)',
+              border: 'none', borderRadius: 9,
+              color: (adminSampleId || adminImageUrl) ? '#fff' : 'rgba(255,255,255,0.3)',
+              fontSize: 12, fontWeight: 700, cursor: (adminSampleId || adminImageUrl) ? 'pointer' : 'not-allowed',
+              boxShadow: (adminSampleId || adminImageUrl) ? '0 3px 14px rgba(168,85,247,0.4)' : 'none',
+            }}
+          >
+            🔗 플레이어 링크 생성
+          </button>
+
+          {/* Generated link */}
+          {adminLink && (
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+              <div style={{ color: 'rgba(255,255,255,0.45)', fontSize: 10, fontWeight: 600, letterSpacing: '0.05em' }}>
+                생성된 링크 (플레이어에게 보내세요)
+              </div>
+              <div
+                style={{
+                  background: 'rgba(168,85,247,0.07)',
+                  border: '1px solid rgba(168,85,247,0.25)',
+                  borderRadius: 8, padding: '7px 10px',
+                  color: 'rgba(255,255,255,0.6)', fontSize: 10,
+                  wordBreak: 'break-all', lineHeight: 1.5,
+                }}
+              >
+                {adminLink}
+              </div>
+              <div style={{ display: 'flex', gap: 6 }}>
+                <button
+                  onClick={copyAdminLink}
+                  style={{
+                    flex: 1, padding: '7px',
+                    background: adminLinkCopied ? 'rgba(34,197,94,0.2)' : 'rgba(168,85,247,0.2)',
+                    border: `1px solid ${adminLinkCopied ? 'rgba(34,197,94,0.5)' : 'rgba(168,85,247,0.4)'}`,
+                    borderRadius: 8,
+                    color: adminLinkCopied ? '#4ade80' : '#c084fc',
+                    fontSize: 11, fontWeight: 700, cursor: 'pointer',
+                  }}
+                >
+                  {adminLinkCopied ? '✓ 복사됨!' : '📋 복사'}
+                </button>
+                <button
+                  onClick={() => window.open(adminLink, '_blank')}
+                  style={{
+                    flex: 1, padding: '7px',
+                    background: 'rgba(168,85,247,0.1)',
+                    border: '1px solid rgba(168,85,247,0.3)',
+                    borderRadius: 8, color: '#c084fc',
+                    fontSize: 11, fontWeight: 600, cursor: 'pointer',
+                  }}
+                >
+                  👁 미리보기
+                </button>
+              </div>
+            </div>
+          )}
         </div>
       )}
 
       {!gameStarted ? (
-        /* ─── Setup screen ─── */
+        /* ── Setup screen ── */
         <div
           style={{
-            flex: 1,
-            display: 'flex',
-            alignItems: 'flex-start',
-            justifyContent: 'center',
-            padding: isMobile ? '14px 12px 24px' : '20px 24px 32px',
-            overflowY: 'auto',
+            flex: 1, display: 'flex', alignItems: 'flex-start', justifyContent: 'center',
+            padding: '14px 12px 32px', overflowY: 'auto',
           }}
         >
-          <div style={{ width: '100%', maxWidth: 560, display: 'flex', flexDirection: 'column', gap: isMobile ? 14 : 18 }}>
+          <div style={{ width: '100%', maxWidth: 560, display: 'flex', flexDirection: 'column', gap: 16 }}>
 
-            {/* Sample images section */}
             <div>
-              <div style={{ color: '#e2d9f3', fontWeight: 700, fontSize: isMobile ? 13 : 14, marginBottom: 10 }}>
-                샘플 이미지 선택
-              </div>
-              <div
-                style={{
-                  display: 'grid',
-                  gridTemplateColumns: isMobile ? 'repeat(3, 1fr)' : 'repeat(3, 1fr)',
-                  gap: isMobile ? 8 : 10,
-                }}
-              >
+              <div style={{ color: '#e2d9f3', fontWeight: 700, fontSize: 13, marginBottom: 10 }}>샘플 이미지 선택</div>
+              <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: 8 }}>
                 {SAMPLE_IMAGES.map(img => (
                   <button
                     key={img.id}
                     onClick={() => selectImage(img.url, img.id)}
                     style={{
-                      position: 'relative',
-                      padding: 0,
-                      border: selectedSampleId === img.id
-                        ? '2px solid rgba(168,85,247,0.9)'
-                        : '2px solid transparent',
-                      borderRadius: 10,
-                      overflow: 'hidden',
-                      cursor: 'pointer',
-                      background: 'none',
-                      aspectRatio: '5/3',
-                      boxShadow: selectedSampleId === img.id
-                        ? '0 0 16px rgba(168,85,247,0.5)'
-                        : '0 2px 8px rgba(0,0,0,0.4)',
+                      position: 'relative', padding: 0,
+                      border: selectedSampleId === img.id ? '2px solid rgba(168,85,247,0.9)' : '2px solid transparent',
+                      borderRadius: 10, overflow: 'hidden', cursor: 'pointer',
+                      background: 'none', aspectRatio: '5/3',
+                      boxShadow: selectedSampleId === img.id ? '0 0 16px rgba(168,85,247,0.5)' : '0 2px 8px rgba(0,0,0,0.4)',
                       transition: 'all 0.15s ease',
                     }}
                   >
-                    <img
-                      src={img.thumb}
-                      alt={img.label}
-                      style={{ width: '100%', height: '100%', objectFit: 'cover', display: 'block' }}
-                      crossOrigin="anonymous"
-                    />
+                    <img src={img.thumb} alt={img.label} crossOrigin="anonymous"
+                      style={{ width: '100%', height: '100%', objectFit: 'cover', display: 'block' }} />
                     <div
                       style={{
-                        position: 'absolute',
-                        inset: 0,
+                        position: 'absolute', inset: 0,
                         background: selectedSampleId === img.id
                           ? 'rgba(168,85,247,0.15)'
                           : 'linear-gradient(to top, rgba(0,0,0,0.55) 0%, transparent 60%)',
-                        display: 'flex',
-                        alignItems: 'flex-end',
-                        justifyContent: 'center',
-                        paddingBottom: 5,
+                        display: 'flex', alignItems: 'flex-end', justifyContent: 'center', paddingBottom: 5,
                       }}
                     >
-                      <span style={{ color: '#fff', fontSize: isMobile ? 10 : 11, fontWeight: 600 }}>{img.label}</span>
+                      <span style={{ color: '#fff', fontSize: 11, fontWeight: 600 }}>{img.label}</span>
                     </div>
                     {selectedSampleId === img.id && (
-                      <div
-                        style={{
-                          position: 'absolute',
-                          top: 5,
-                          right: 5,
-                          width: 18,
-                          height: 18,
-                          background: '#a855f7',
-                          borderRadius: '50%',
-                          display: 'flex',
-                          alignItems: 'center',
-                          justifyContent: 'center',
-                        }}
-                      >
+                      <div style={{
+                        position: 'absolute', top: 5, right: 5, width: 18, height: 18,
+                        background: '#a855f7', borderRadius: '50%',
+                        display: 'flex', alignItems: 'center', justifyContent: 'center',
+                      }}>
                         <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="#fff" strokeWidth="3" strokeLinecap="round" strokeLinejoin="round">
                           <polyline points="20 6 9 17 4 12"/>
                         </svg>
@@ -467,14 +665,12 @@ export default function PuzzleGame() {
               </div>
             </div>
 
-            {/* Divider */}
             <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
               <div style={{ flex: 1, height: 1, background: 'rgba(168,85,247,0.2)' }} />
               <span style={{ color: 'rgba(255,255,255,0.35)', fontSize: 11, fontWeight: 600 }}>또는 직접 업로드</span>
               <div style={{ flex: 1, height: 1, background: 'rgba(168,85,247,0.2)' }} />
             </div>
 
-            {/* Upload area */}
             <div
               onDrop={handleDrop}
               onDragOver={e => { e.preventDefault(); setDragOver(true); }}
@@ -482,65 +678,48 @@ export default function PuzzleGame() {
               onClick={() => fileInputRef.current?.click()}
               style={{
                 border: `2px dashed ${dragOver ? 'rgba(168,85,247,0.9)' : selectedSampleId ? 'rgba(168,85,247,0.2)' : 'rgba(168,85,247,0.4)'}`,
-                borderRadius: 12,
-                padding: isMobile ? '16px 12px' : '20px 16px',
-                textAlign: 'center',
-                cursor: 'pointer',
+                borderRadius: 12, padding: '14px 12px',
+                textAlign: 'center', cursor: 'pointer',
                 background: dragOver ? 'rgba(168,85,247,0.1)' : 'rgba(15,18,35,0.5)',
                 transition: 'all 0.2s ease',
               }}
             >
               {imageUrl && !selectedSampleId ? (
-                <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 8 }}>
-                  <img
-                    src={imageUrl}
-                    alt="Uploaded"
-                    style={{ maxWidth: '100%', maxHeight: isMobile ? 100 : 130, borderRadius: 8, objectFit: 'contain' }}
-                  />
+                <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 6 }}>
+                  <img src={imageUrl} alt="Uploaded"
+                    style={{ maxWidth: '100%', maxHeight: 100, borderRadius: 7, objectFit: 'contain' }} />
                   <span style={{ color: '#c084fc', fontSize: 11 }}>클릭하여 다른 이미지 선택</span>
                 </div>
               ) : (
                 <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 8 }}>
-                  <span style={{ fontSize: 20 }}>📷</span>
-                  <span style={{ color: selectedSampleId ? 'rgba(255,255,255,0.35)' : '#c084fc', fontWeight: 600, fontSize: isMobile ? 12 : 13 }}>
+                  <span style={{ fontSize: 18 }}>📷</span>
+                  <span style={{ color: selectedSampleId ? 'rgba(255,255,255,0.35)' : '#c084fc', fontWeight: 600, fontSize: 13 }}>
                     내 이미지 업로드
                   </span>
                 </div>
               )}
             </div>
 
-            <input
-              ref={fileInputRef}
-              type="file"
-              accept="image/*"
-              style={{ display: 'none' }}
-              onChange={handleFileChange}
-            />
+            <input ref={fileInputRef} type="file" accept="image/*" style={{ display: 'none' }} onChange={handleFileChange} />
 
-            {/* Piece count */}
             <div>
-              <div style={{ color: '#e2d9f3', fontWeight: 600, fontSize: isMobile ? 12 : 13, marginBottom: 8 }}>
+              <div style={{ color: '#e2d9f3', fontWeight: 600, fontSize: 13, marginBottom: 7 }}>
                 피스 수 선택 ({selectedPieceCount}개)
               </div>
-              <div style={{ display: 'flex', flexWrap: 'wrap', gap: isMobile ? 6 : 8 }}>
+              <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6 }}>
                 {PIECE_COUNTS.map(count => (
                   <button
                     key={count}
                     onClick={() => setSelectedPieceCount(count)}
                     style={{
-                      padding: isMobile ? '6px 12px' : '7px 16px',
-                      borderRadius: 8,
-                      border: selectedPieceCount === count
-                        ? '2px solid rgba(168,85,247,0.9)'
-                        : '1px solid rgba(168,85,247,0.25)',
+                      padding: '6px 13px', borderRadius: 8,
+                      border: selectedPieceCount === count ? '2px solid rgba(168,85,247,0.9)' : '1px solid rgba(168,85,247,0.25)',
                       background: selectedPieceCount === count
                         ? 'linear-gradient(135deg, rgba(124,58,237,0.4), rgba(168,85,247,0.3))'
                         : 'rgba(15,18,35,0.6)',
                       color: selectedPieceCount === count ? '#e2d9f3' : 'rgba(255,255,255,0.5)',
                       fontWeight: selectedPieceCount === count ? 700 : 500,
-                      fontSize: isMobile ? 12 : 13,
-                      cursor: 'pointer',
-                      transition: 'all 0.15s ease',
+                      fontSize: 12, cursor: 'pointer', transition: 'all 0.15s ease',
                       boxShadow: selectedPieceCount === count ? '0 0 12px rgba(168,85,247,0.3)' : 'none',
                     }}
                   >
@@ -550,21 +729,15 @@ export default function PuzzleGame() {
               </div>
             </div>
 
-            {/* Start button */}
             <button
-              onClick={startGame}
+              onClick={() => startGame()}
               disabled={!imageUrl}
               style={{
-                padding: isMobile ? '12px' : '13px',
-                background: imageUrl
-                  ? 'linear-gradient(135deg, #7c3aed, #a855f7)'
-                  : 'rgba(100,100,100,0.3)',
-                border: 'none',
-                borderRadius: 12,
+                padding: '13px',
+                background: imageUrl ? 'linear-gradient(135deg, #7c3aed, #a855f7)' : 'rgba(100,100,100,0.3)',
+                border: 'none', borderRadius: 12,
                 color: imageUrl ? '#fff' : 'rgba(255,255,255,0.4)',
-                fontSize: isMobile ? 14 : 15,
-                fontWeight: 700,
-                cursor: imageUrl ? 'pointer' : 'not-allowed',
+                fontSize: 15, fontWeight: 700, cursor: imageUrl ? 'pointer' : 'not-allowed',
                 boxShadow: imageUrl ? '0 4px 20px rgba(168,85,247,0.5)' : 'none',
                 transition: 'all 0.2s ease',
               }}
@@ -574,82 +747,53 @@ export default function PuzzleGame() {
           </div>
         </div>
       ) : (
-        /* ─── Game screen ─── */
+        /* ── Game screen ── */
         <div
           style={{
-            flex: 1,
-            display: 'flex',
-            flexDirection: 'column',
-            alignItems: 'center',
-            overflow: 'auto',
-            padding: isMobile ? '8px 8px 180px' : '12px 16px 200px',
+            flex: 1, display: 'flex', flexDirection: 'column',
+            alignItems: 'center', justifyContent: 'flex-start',
+            overflow: 'hidden', padding: '6px 8px 4px',
           }}
         >
           {/* Reference image row */}
-          <div
-            style={{
-              display: 'flex',
-              alignItems: 'center',
-              gap: 12,
-              marginBottom: isMobile && isLandscape ? 6 : 10,
-              flexShrink: 0,
-            }}
-          >
+          <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 6, flexShrink: 0 }}>
             <div
               style={{
-                position: 'relative',
-                borderRadius: 7,
-                overflow: 'hidden',
+                position: 'relative', borderRadius: 7, overflow: 'hidden',
                 border: '1px solid rgba(168,85,247,0.5)',
-                boxShadow: '0 0 16px rgba(168,85,247,0.2)',
-                flexShrink: 0,
+                boxShadow: '0 0 16px rgba(168,85,247,0.2)', flexShrink: 0,
               }}
             >
               <img
                 src={imageUrl!}
                 alt="Reference"
                 crossOrigin="anonymous"
-                style={{
-                  width: isMobile && isLandscape ? 100 : isMobile ? 130 : 178,
-                  height: isMobile && isLandscape ? 56 : isMobile ? 73 : 100,
-                  objectFit: 'cover',
-                  display: 'block',
-                }}
+                style={{ width: 120, height: 68, objectFit: 'cover', display: 'block' }}
               />
               <div style={{ position: 'absolute', inset: 0, background: 'linear-gradient(to bottom, transparent 55%, rgba(0,0,0,0.5))' }} />
-              <div
-                style={{
-                  position: 'absolute',
-                  bottom: 4,
-                  left: 0,
-                  right: 0,
-                  textAlign: 'center',
-                  color: 'rgba(255,255,255,0.85)',
-                  fontSize: isMobile ? 8 : 10,
-                  fontWeight: 600,
-                  letterSpacing: '0.06em',
-                  textTransform: 'uppercase',
-                }}
-              >
+              <div style={{
+                position: 'absolute', bottom: 3, left: 0, right: 0,
+                textAlign: 'center', color: 'rgba(255,255,255,0.85)',
+                fontSize: 8, fontWeight: 600, letterSpacing: '0.06em', textTransform: 'uppercase',
+              }}>
                 목표 이미지
               </div>
             </div>
-
             {config && (
-              <div style={{ display: 'flex', flexDirection: 'column', gap: 5 }}>
-                <div style={{ display: 'inline-flex', alignItems: 'center', gap: 5, padding: '3px 8px', background: 'rgba(124,58,237,0.2)', borderRadius: 6, border: '1px solid rgba(168,85,247,0.3)' }}>
-                  <span style={{ color: 'rgba(255,255,255,0.45)', fontSize: isMobile ? 9 : 11 }}>그리드</span>
-                  <span style={{ color: '#c084fc', fontSize: isMobile ? 10 : 12, fontWeight: 700 }}>{config.cols}×{config.rows}</span>
+              <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
+                <div style={{ display: 'inline-flex', alignItems: 'center', gap: 4, padding: '3px 7px', background: 'rgba(124,58,237,0.2)', borderRadius: 6, border: '1px solid rgba(168,85,247,0.3)' }}>
+                  <span style={{ color: 'rgba(255,255,255,0.45)', fontSize: 10 }}>그리드</span>
+                  <span style={{ color: '#c084fc', fontSize: 11, fontWeight: 700 }}>{config.cols}×{config.rows}</span>
                 </div>
-                <div style={{ display: 'inline-flex', alignItems: 'center', gap: 5, padding: '3px 8px', background: 'rgba(124,58,237,0.2)', borderRadius: 6, border: '1px solid rgba(168,85,247,0.3)' }}>
-                  <span style={{ color: 'rgba(255,255,255,0.45)', fontSize: isMobile ? 9 : 11 }}>총</span>
-                  <span style={{ color: '#c084fc', fontSize: isMobile ? 10 : 12, fontWeight: 700 }}>{config.totalPieces}조각</span>
+                <div style={{ display: 'inline-flex', alignItems: 'center', gap: 4, padding: '3px 7px', background: 'rgba(124,58,237,0.2)', borderRadius: 6, border: '1px solid rgba(168,85,247,0.3)' }}>
+                  <span style={{ color: 'rgba(255,255,255,0.45)', fontSize: 10 }}>총</span>
+                  <span style={{ color: '#c084fc', fontSize: 11, fontWeight: 700 }}>{config.totalPieces}조각</span>
                 </div>
               </div>
             )}
           </div>
 
-          {/* Board */}
+          {/* Board + tray */}
           {config && (
             <div
               style={{
@@ -665,6 +809,7 @@ export default function PuzzleGame() {
                 config={config}
                 boardWidth={BOARD_WIDTH}
                 boardHeight={BOARD_HEIGHT}
+                trayHeight={trayHeight}
                 onComplete={handleComplete}
                 snappingPieceId={snappingPieceId}
                 setSnappingPieceId={setSnappingPieceId}
@@ -674,77 +819,55 @@ export default function PuzzleGame() {
         </div>
       )}
 
-      {/* Complete overlay */}
+      {/* ── Completion overlay ── */}
       {isComplete && (
         <div
           style={{
-            position: 'fixed',
-            inset: 0,
-            display: 'flex',
-            alignItems: 'center',
-            justifyContent: 'center',
-            background: 'rgba(0,0,0,0.75)',
-            backdropFilter: 'blur(10px)',
-            zIndex: 9999,
-            padding: 16,
+            position: 'fixed', inset: 0,
+            display: 'flex', alignItems: 'center', justifyContent: 'center',
+            background: 'rgba(0,0,0,0.75)', backdropFilter: 'blur(10px)',
+            zIndex: 9999, padding: 16,
           }}
         >
           <div
             style={{
-              display: 'flex',
-              flexDirection: 'column',
-              alignItems: 'center',
-              gap: 20,
-              padding: isMobile ? '32px 28px' : '44px 52px',
+              display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 18,
+              padding: '36px 44px',
               background: 'linear-gradient(135deg, rgba(20,15,40,0.99), rgba(30,20,60,0.99))',
               borderRadius: 22,
               border: '2px solid rgba(168,85,247,0.6)',
               boxShadow: '0 0 80px rgba(168,85,247,0.4), 0 0 160px rgba(124,58,237,0.2)',
-              textAlign: 'center',
-              width: '100%',
-              maxWidth: 340,
+              textAlign: 'center', width: '100%', maxWidth: 320,
             }}
           >
-            <div style={{ fontSize: isMobile ? 48 : 60 }}>🎉</div>
+            <div style={{ fontSize: 54 }}>🎉</div>
             <div>
-              <div
-                style={{
-                  fontSize: isMobile ? 22 : 28,
-                  fontWeight: 800,
-                  letterSpacing: '-0.02em',
-                  background: 'linear-gradient(135deg, #c084fc, #a855f7)',
-                  WebkitBackgroundClip: 'text',
-                  WebkitTextFillColor: 'transparent',
-                  marginBottom: 5,
-                }}
-              >
+              <div style={{
+                fontSize: 26, fontWeight: 800, letterSpacing: '-0.02em',
+                background: 'linear-gradient(135deg, #c084fc, #a855f7)',
+                WebkitBackgroundClip: 'text', WebkitTextFillColor: 'transparent',
+                marginBottom: 4,
+              }}>
                 퍼즐 완성!
               </div>
-              <div style={{ color: 'rgba(255,255,255,0.5)', fontSize: isMobile ? 12 : 13 }}>
+              <div style={{ color: 'rgba(255,255,255,0.5)', fontSize: 12 }}>
                 {totalPieces}개 조각을 모두 맞췄어요!
               </div>
             </div>
-            <div
-              style={{
-                display: 'flex',
-                flexDirection: 'column',
-                alignItems: 'center',
-                gap: 5,
-                padding: '14px 28px',
-                background: 'rgba(168,85,247,0.12)',
-                border: '1px solid rgba(168,85,247,0.35)',
-                borderRadius: 12,
-                width: '100%',
-              }}
-            >
-              <span style={{ color: 'rgba(255,255,255,0.45)', fontSize: 10, fontWeight: 600, letterSpacing: '0.08em', textTransform: 'uppercase' }}>
+            <div style={{
+              display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 4,
+              padding: '12px 24px',
+              background: 'rgba(168,85,247,0.12)', border: '1px solid rgba(168,85,247,0.35)',
+              borderRadius: 12, width: '100%',
+            }}>
+              <span style={{ color: 'rgba(255,255,255,0.45)', fontSize: 9, fontWeight: 600, letterSpacing: '0.08em', textTransform: 'uppercase' }}>
                 완성까지 걸린 시간
               </span>
-              <div style={{ display: 'flex', alignItems: 'center', gap: 7 }}>
-                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#c084fc" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+              <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+                <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="#c084fc" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
                   <circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/>
                 </svg>
-                <span style={{ color: '#e2d9f3', fontSize: isMobile ? 22 : 26, fontWeight: 800, fontVariantNumeric: 'tabular-nums' }}>
+                <span style={{ color: '#e2d9f3', fontSize: 24, fontWeight: 800, fontVariantNumeric: 'tabular-nums' }}>
                   {formatTime(finalTime)}
                 </span>
               </div>
@@ -753,31 +876,20 @@ export default function PuzzleGame() {
               <button
                 onClick={() => { setGameStarted(false); setIsComplete(false); stopTimer(); setElapsedSeconds(0); }}
                 style={{
-                  flex: 1,
-                  padding: '11px',
-                  background: 'rgba(168,85,247,0.2)',
-                  border: '1px solid rgba(168,85,247,0.5)',
-                  borderRadius: 11,
-                  color: '#c084fc',
-                  fontSize: isMobile ? 13 : 14,
-                  fontWeight: 600,
-                  cursor: 'pointer',
+                  flex: 1, padding: '10px',
+                  background: 'rgba(168,85,247,0.2)', border: '1px solid rgba(168,85,247,0.5)',
+                  borderRadius: 10, color: '#c084fc', fontSize: 13, fontWeight: 600, cursor: 'pointer',
                 }}
               >
                 새 이미지
               </button>
               <button
-                onClick={startGame}
+                onClick={() => startGame()}
                 style={{
-                  flex: 1,
-                  padding: '11px',
+                  flex: 1, padding: '10px',
                   background: 'linear-gradient(135deg, #7c3aed, #a855f7)',
-                  border: 'none',
-                  borderRadius: 11,
-                  color: '#fff',
-                  fontSize: isMobile ? 13 : 14,
-                  fontWeight: 700,
-                  cursor: 'pointer',
+                  border: 'none', borderRadius: 10, color: '#fff',
+                  fontSize: 13, fontWeight: 700, cursor: 'pointer',
                   boxShadow: '0 4px 18px rgba(168,85,247,0.5)',
                 }}
               >

@@ -54,77 +54,70 @@ export function calculateGrid(numPieces: number, boardWidth: number, boardHeight
   };
 }
 
-export function createPieces(config: PuzzleConfig, boardWidth: number, boardHeight: number): PuzzlePiece[] {
+export function createPieces(
+  config: PuzzleConfig,
+  boardWidth: number,
+  boardHeight: number
+): { pieces: PuzzlePiece[]; trayHeight: number } {
   const { cols, rows, pieceWidth, pieceHeight } = config;
-  const pieces: PuzzlePiece[] = [];
+  const totalPieces = cols * rows;
 
-  const tabGrid: { top: number; right: number; bottom: number; left: number }[][] = Array.from({ length: rows }, () =>
-    Array.from({ length: cols }, () => ({ top: 0, right: 0, bottom: 0, left: 0 }))
+  const tabGrid: { top: number; right: number; bottom: number; left: number }[][] = Array.from(
+    { length: rows },
+    () => Array.from({ length: cols }, () => ({ top: 0, right: 0, bottom: 0, left: 0 }))
   );
 
   for (let r = 0; r < rows; r++) {
     for (let c = 0; c < cols; c++) {
       const top = r === 0 ? 0 : -tabGrid[r - 1][c].bottom;
       const left = c === 0 ? 0 : -tabGrid[r][c - 1].right;
-      const right = c === cols - 1 ? 0 : (Math.random() > 0.5 ? 1 : -1);
-      const bottom = r === rows - 1 ? 0 : (Math.random() > 0.5 ? 1 : -1);
+      const right = c === cols - 1 ? 0 : Math.random() > 0.5 ? 1 : -1;
+      const bottom = r === rows - 1 ? 0 : Math.random() > 0.5 ? 1 : -1;
       tabGrid[r][c] = { top, right, bottom, left };
     }
   }
 
-  const scatterPositions: { x: number; y: number }[] = [];
-  const totalPieces = cols * rows;
+  // Tray layout: place pieces in a shuffled grid below the board
+  const trayCols = Math.max(2, Math.min(6, Math.round(boardWidth / (pieceWidth * 1.25))));
+  const trayRows = Math.ceil(totalPieces / trayCols);
+  const slotW = boardWidth / trayCols;
+  const slotH = pieceHeight * 1.3 + 8;
+  const TRAY_PAD = 20;
+  const trayHeight = trayRows * slotH + TRAY_PAD * 2;
 
-  for (let i = 0; i < totalPieces; i++) {
-    let attempts = 0;
-    let pos: { x: number; y: number };
-    do {
-      const side = Math.floor(Math.random() * 4);
-      if (side === 0) {
-        pos = {
-          x: Math.random() * boardWidth,
-          y: boardHeight + 20 + Math.random() * 180,
-        };
-      } else if (side === 1) {
-        pos = {
-          x: -pieceWidth - 20 - Math.random() * 120,
-          y: Math.random() * boardHeight * 1.5,
-        };
-      } else if (side === 2) {
-        pos = {
-          x: boardWidth + 20 + Math.random() * 120,
-          y: Math.random() * boardHeight * 1.5,
-        };
-      } else {
-        pos = {
-          x: Math.random() * boardWidth * 1.6 - boardWidth * 0.3,
-          y: boardHeight + 20 + Math.random() * 200,
-        };
-      }
-      attempts++;
-    } while (
-      scatterPositions.some(
-        p => Math.abs(p.x - pos.x) < pieceWidth * 0.6 && Math.abs(p.y - pos.y) < pieceHeight * 0.6
-      ) && attempts < 20
-    );
-    scatterPositions.push(pos);
+  // Create a shuffled index array for tray positions
+  const slotIndices = Array.from({ length: totalPieces }, (_, i) => i);
+  for (let i = slotIndices.length - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1));
+    [slotIndices[i], slotIndices[j]] = [slotIndices[j], slotIndices[i]];
   }
 
+  const pieces: PuzzlePiece[] = [];
   let id = 0;
+
   for (let r = 0; r < rows; r++) {
     for (let c = 0; c < cols; c++) {
       const correctX = c * pieceWidth;
       const correctY = r * pieceHeight;
-      const scatter = scatterPositions[id];
+
+      const slot = slotIndices[id];
+      const trayCol = slot % trayCols;
+      const trayRow = Math.floor(slot / trayCols);
+
+      const offsetX = (Math.random() - 0.5) * slotW * 0.25;
+      const offsetY = (Math.random() - 0.5) * slotH * 0.25;
+
+      const currentX = trayCol * slotW + (slotW - pieceWidth) / 2 + offsetX;
+      const currentY = boardHeight + TRAY_PAD + trayRow * slotH + (slotH - pieceHeight) / 2 + offsetY;
 
       pieces.push({
-        id: id,
+        id,
         row: r,
         col: c,
         correctX,
         correctY,
-        currentX: scatter.x,
-        currentY: scatter.y,
+        currentX,
+        currentY,
         width: pieceWidth,
         height: pieceHeight,
         isPlaced: false,
@@ -135,7 +128,7 @@ export function createPieces(config: PuzzleConfig, boardWidth: number, boardHeig
     }
   }
 
-  return pieces;
+  return { pieces, trayHeight };
 }
 
 export function getPiecePath(piece: PuzzlePiece, tabFraction: number = 0.35): string {
