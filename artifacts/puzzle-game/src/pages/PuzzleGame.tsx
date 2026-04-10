@@ -6,6 +6,15 @@ const PIECE_COUNTS = [4, 6, 9, 12, 16, 20, 25, 30];
 const BOARD_WIDTH = 800;
 const BOARD_HEIGHT = 450;
 
+function formatTime(seconds: number): string {
+  const h = Math.floor(seconds / 3600);
+  const m = Math.floor((seconds % 3600) / 60);
+  const s = seconds % 60;
+  if (h > 0) return `${h}시간 ${m}분 ${s}초`;
+  if (m > 0) return `${m}분 ${s}초`;
+  return `${s}초`;
+}
+
 export default function PuzzleGame() {
   const [imageUrl, setImageUrl] = useState<string | null>(null);
   const [pieces, setPieces] = useState<PuzzlePiece[]>([]);
@@ -17,6 +26,30 @@ export default function PuzzleGame() {
   const [dragOver, setDragOver] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const [completedCount, setCompletedCount] = useState(0);
+  const [elapsedSeconds, setElapsedSeconds] = useState(0);
+  const [finalTime, setFinalTime] = useState(0);
+  const startTimeRef = useRef<number>(0);
+  const timerRef = useRef<ReturnType<typeof setInterval> | null>(null);
+
+  const stopTimer = useCallback(() => {
+    if (timerRef.current) {
+      clearInterval(timerRef.current);
+      timerRef.current = null;
+    }
+  }, []);
+
+  const startTimer = useCallback(() => {
+    stopTimer();
+    startTimeRef.current = Date.now();
+    setElapsedSeconds(0);
+    timerRef.current = setInterval(() => {
+      setElapsedSeconds(Math.floor((Date.now() - startTimeRef.current) / 1000));
+    }, 1000);
+  }, [stopTimer]);
+
+  useEffect(() => {
+    return () => stopTimer();
+  }, [stopTimer]);
 
   const handleImageUpload = useCallback((file: File) => {
     const url = URL.createObjectURL(file);
@@ -25,7 +58,9 @@ export default function PuzzleGame() {
     setIsComplete(false);
     setPieces([]);
     setConfig(null);
-  }, []);
+    stopTimer();
+    setElapsedSeconds(0);
+  }, [stopTimer]);
 
   const handleFileChange = useCallback((e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
@@ -50,11 +85,15 @@ export default function PuzzleGame() {
     setGameStarted(true);
     setIsComplete(false);
     setCompletedCount(0);
-  }, [imageUrl, selectedPieceCount]);
+    startTimer();
+  }, [imageUrl, selectedPieceCount, startTimer]);
 
   const handleComplete = useCallback(() => {
+    const elapsed = Math.floor((Date.now() - startTimeRef.current) / 1000);
+    setFinalTime(elapsed);
+    stopTimer();
     setIsComplete(true);
-  }, []);
+  }, [stopTimer]);
 
   useEffect(() => {
     const placed = pieces.filter(p => p.isPlaced).length;
@@ -111,27 +150,12 @@ export default function PuzzleGame() {
 
         {gameStarted && !isComplete && (
           <>
-            <div
-              style={{
-                width: 1,
-                height: 24,
-                background: 'rgba(168,85,247,0.3)',
-                marginLeft: 4,
-              }}
-            />
+            <div style={{ width: 1, height: 24, background: 'rgba(168,85,247,0.3)', marginLeft: 4 }} />
             <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
               <span style={{ color: 'rgba(168,85,247,0.9)', fontSize: 13, fontWeight: 600, whiteSpace: 'nowrap' }}>
                 {completedCount} / {totalPieces}
               </span>
-              <div
-                style={{
-                  width: 100,
-                  height: 5,
-                  background: 'rgba(255,255,255,0.1)',
-                  borderRadius: 99,
-                  overflow: 'hidden',
-                }}
-              >
+              <div style={{ width: 100, height: 5, background: 'rgba(255,255,255,0.1)', borderRadius: 99, overflow: 'hidden' }}>
                 <div
                   style={{
                     width: `${progress}%`,
@@ -144,6 +168,35 @@ export default function PuzzleGame() {
                 />
               </div>
             </div>
+            <div style={{ width: 1, height: 24, background: 'rgba(168,85,247,0.3)' }} />
+            <div
+              style={{
+                display: 'flex',
+                alignItems: 'center',
+                gap: 6,
+                padding: '4px 12px',
+                background: 'rgba(168,85,247,0.1)',
+                borderRadius: 8,
+                border: '1px solid rgba(168,85,247,0.25)',
+              }}
+            >
+              <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="rgba(168,85,247,0.85)" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+                <circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/>
+              </svg>
+              <span
+                style={{
+                  color: 'rgba(192,132,252,0.95)',
+                  fontSize: 13,
+                  fontWeight: 700,
+                  fontVariantNumeric: 'tabular-nums',
+                  letterSpacing: '0.02em',
+                  whiteSpace: 'nowrap',
+                  minWidth: 36,
+                }}
+              >
+                {formatTime(elapsedSeconds)}
+              </span>
+            </div>
           </>
         )}
 
@@ -151,7 +204,7 @@ export default function PuzzleGame() {
 
         {gameStarted && (
           <button
-            onClick={() => { setGameStarted(false); setIsComplete(false); }}
+            onClick={() => { setGameStarted(false); setIsComplete(false); stopTimer(); setElapsedSeconds(0); }}
             style={{
               padding: '6px 14px',
               background: 'rgba(168,85,247,0.15)',
@@ -438,8 +491,8 @@ export default function PuzzleGame() {
               textAlign: 'center',
             }}
           >
-            <div style={{ fontSize: 64 }}>🎉</div>
-            <div>
+            <div style={{ fontSize: 60 }}>🎉</div>
+            <div style={{ textAlign: 'center' }}>
               <div
                 style={{
                   color: '#fff',
@@ -449,18 +502,53 @@ export default function PuzzleGame() {
                   background: 'linear-gradient(135deg, #c084fc, #a855f7)',
                   WebkitBackgroundClip: 'text',
                   WebkitTextFillColor: 'transparent',
-                  marginBottom: 8,
+                  marginBottom: 6,
                 }}
               >
                 퍼즐 완성!
               </div>
-              <div style={{ color: 'rgba(255,255,255,0.55)', fontSize: 14 }}>
+              <div style={{ color: 'rgba(255,255,255,0.5)', fontSize: 13 }}>
                 {totalPieces}개 조각을 모두 맞췄어요!
               </div>
             </div>
+
+            {/* Time result */}
+            <div
+              style={{
+                display: 'flex',
+                flexDirection: 'column',
+                alignItems: 'center',
+                gap: 6,
+                padding: '16px 32px',
+                background: 'rgba(168,85,247,0.12)',
+                border: '1px solid rgba(168,85,247,0.35)',
+                borderRadius: 14,
+              }}
+            >
+              <span style={{ color: 'rgba(255,255,255,0.5)', fontSize: 11, fontWeight: 600, letterSpacing: '0.08em', textTransform: 'uppercase' }}>
+                완성까지 걸린 시간
+              </span>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#c084fc" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+                  <circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/>
+                </svg>
+                <span
+                  style={{
+                    color: '#e2d9f3',
+                    fontSize: 26,
+                    fontWeight: 800,
+                    fontVariantNumeric: 'tabular-nums',
+                    letterSpacing: '-0.01em',
+                  }}
+                >
+                  {formatTime(finalTime)}
+                </span>
+              </div>
+            </div>
+
             <div style={{ display: 'flex', gap: 12 }}>
               <button
-                onClick={() => { setGameStarted(false); setIsComplete(false); }}
+                onClick={() => { setGameStarted(false); setIsComplete(false); stopTimer(); setElapsedSeconds(0); }}
                 style={{
                   padding: '11px 24px',
                   background: 'rgba(168,85,247,0.2)',
