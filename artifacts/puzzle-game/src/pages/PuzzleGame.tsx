@@ -5,6 +5,7 @@ import { PuzzleBoard } from '@/components/PuzzleBoard';
 const PIECE_COUNTS = [4, 6, 9, 12, 16, 20, 25, 30];
 const BOARD_WIDTH = 800;
 const BOARD_HEIGHT = 450;
+const HEADER_H = 48;
 
 const SAMPLE_IMAGES = [
   { id: 'nature', label: '자연', url: 'https://images.unsplash.com/photo-1506905925346-21bda4d32df4?w=800&h=450&fit=crop&auto=format', thumb: 'https://images.unsplash.com/photo-1506905925346-21bda4d32df4?w=200&h=120&fit=crop&auto=format' },
@@ -15,13 +16,11 @@ const SAMPLE_IMAGES = [
   { id: 'space', label: '우주', url: 'https://images.unsplash.com/photo-1464802686167-b939a6910659?w=800&h=450&fit=crop&auto=format', thumb: 'https://images.unsplash.com/photo-1464802686167-b939a6910659?w=200&h=120&fit=crop&auto=format' },
 ];
 
-function formatTime(seconds: number): string {
-  const h = Math.floor(seconds / 3600);
-  const m = Math.floor((seconds % 3600) / 60);
-  const s = seconds % 60;
-  if (h > 0) return `${h}시간 ${m}분 ${s}초`;
-  if (m > 0) return `${m}분 ${s}초`;
-  return `${s}초`;
+function formatTime(s: number) {
+  const h = Math.floor(s / 3600), m = Math.floor((s % 3600) / 60), sec = s % 60;
+  if (h > 0) return `${h}시간 ${m}분 ${sec}초`;
+  if (m > 0) return `${m}분 ${sec}초`;
+  return `${sec}초`;
 }
 
 function useViewport() {
@@ -36,50 +35,60 @@ function useViewport() {
 }
 
 function getUrlParams() {
-  const params = new URLSearchParams(window.location.search);
+  const p = new URLSearchParams(window.location.search);
   return {
-    image: params.get('img') ?? null,
-    pieces: parseInt(params.get('pieces') ?? '0', 10) || null,
-    autostart: params.get('autostart') === '1',
-    admin: params.get('admin') === '1',
+    img: p.get('img'),
+    pid: p.get('pid'),
+    pieces: parseInt(p.get('pieces') ?? '0', 10) || null,
+    autostart: p.get('autostart') === '1',
+    admin: p.get('admin') === '1',
   };
 }
 
-// Compress an image file to a base64 data URL (small size for URL sharing)
-function compressImageFile(file: File): Promise<string> {
+function compressImage(file: File, maxW: number, maxH: number, quality: number): Promise<string> {
   return new Promise((resolve, reject) => {
     const img = new Image();
     const blobUrl = URL.createObjectURL(file);
     img.onload = () => {
-      const MAX_W = 400, MAX_H = 225;
-      let w = img.naturalWidth, h = img.naturalHeight;
-      const ratio = Math.min(MAX_W / w, MAX_H / h, 1);
-      w = Math.round(w * ratio);
-      h = Math.round(h * ratio);
-      const canvas = document.createElement('canvas');
-      canvas.width = w;
-      canvas.height = h;
-      const ctx = canvas.getContext('2d');
-      if (!ctx) { reject(new Error('canvas error')); return; }
-      ctx.drawImage(img, 0, 0, w, h);
+      const ratio = Math.min(maxW / img.naturalWidth, maxH / img.naturalHeight, 1);
+      const w = Math.round(img.naturalWidth * ratio);
+      const h = Math.round(img.naturalHeight * ratio);
+      const c = document.createElement('canvas');
+      c.width = w; c.height = h;
+      c.getContext('2d')!.drawImage(img, 0, 0, w, h);
       URL.revokeObjectURL(blobUrl);
-      resolve(canvas.toDataURL('image/jpeg', 0.65));
+      resolve(c.toDataURL('image/jpeg', quality));
     };
     img.onerror = reject;
     img.src = blobUrl;
   });
 }
 
+async function uploadToApi(base64: string): Promise<string> {
+  const res = await fetch('/api/puzzle-images', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ data: base64 }),
+  });
+  if (!res.ok) throw new Error('Upload failed');
+  const json = await res.json() as { id: string };
+  return json.id;
+}
+
+async function fetchFromApi(pid: string): Promise<string> {
+  const res = await fetch(`/api/puzzle-images/${pid}`);
+  if (!res.ok) throw new Error('Not found');
+  const json = await res.json() as { data: string };
+  return json.data;
+}
+
 export default function PuzzleGame() {
   const urlParams = useRef(getUrlParams());
 
-  const [imageUrl, setImageUrl] = useState<string | null>(urlParams.current.image);
+  const [imageUrl, setImageUrl] = useState<string | null>(() => urlParams.current.img);
   const [selectedSampleId, setSelectedSampleId] = useState<string | null>(() => {
-    if (urlParams.current.image) {
-      const match = SAMPLE_IMAGES.find(s => s.url === urlParams.current.image);
-      return match?.id ?? null;
-    }
-    return null;
+    const u = urlParams.current.img;
+    return u ? (SAMPLE_IMAGES.find(s => s.url === u)?.id ?? null) : null;
   });
   const [pieces, setPieces] = useState<PuzzlePiece[]>([]);
   const [config, setConfig] = useState<PuzzleConfig | null>(null);
@@ -97,28 +106,40 @@ export default function PuzzleGame() {
   const timerRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const [showQr, setShowQr] = useState(false);
   const [copied, setCopied] = useState(false);
+  const [loading, setLoading] = useState(false);
+  const [loadError, setLoadError] = useState('');
 
-  // Admin state
+  // Admin
   const [showAdmin, setShowAdmin] = useState(urlParams.current.admin);
   const [adminSampleId, setAdminSampleId] = useState<string | null>(null);
   const [adminImageUrl, setAdminImageUrl] = useState('');
-  const [adminUploadedBase64, setAdminUploadedBase64] = useState<string | null>(null);
+  const [adminUploadPreview, setAdminUploadPreview] = useState('');
   const [adminUploadName, setAdminUploadName] = useState('');
+  const [adminUploadBase64, setAdminUploadBase64] = useState('');
   const [adminDragOver, setAdminDragOver] = useState(false);
+  const [adminCompressing, setAdminCompressing] = useState(false);
   const [adminPieces, setAdminPieces] = useState(9);
   const [adminLink, setAdminLink] = useState('');
   const [adminLinkCopied, setAdminLinkCopied] = useState(false);
-  const [adminCompressing, setAdminCompressing] = useState(false);
-  const adminFileInputRef = useRef<HTMLInputElement>(null);
+  const [adminGenerating, setAdminGenerating] = useState(false);
+  const adminFileRef = useRef<HTMLInputElement>(null);
 
   const vp = useViewport();
-  const HEADER_H = 48;
+  const isLandscape = vp.w > vp.h;
+
+  // ── Board scale: wrapper div gets the scaled dimensions as layout size ──
+  const refRowH = isLandscape ? 52 : 86;
+  const gamePad = 12;
   const totalPlayH = BOARD_HEIGHT + trayHeight;
-  const boardScale = gameStarted && config
-    ? Math.min((vp.w - 16) / BOARD_WIDTH, (vp.h - HEADER_H - 8) / totalPlayH, 1)
+  const boardScale = gameStarted && config && trayHeight > 0
+    ? Math.min(
+        (vp.w - 16) / BOARD_WIDTH,
+        (vp.h - HEADER_H - refRowH - gamePad) / totalPlayH,
+        1
+      )
     : 1;
 
-  const shareUrl = typeof window !== 'undefined' ? window.location.origin + window.location.pathname : '';
+  const baseUrl = typeof window !== 'undefined' ? window.location.origin + window.location.pathname : '';
 
   const stopTimer = useCallback(() => {
     if (timerRef.current) { clearInterval(timerRef.current); timerRef.current = null; }
@@ -128,40 +149,33 @@ export default function PuzzleGame() {
     stopTimer();
     startTimeRef.current = Date.now();
     setElapsedSeconds(0);
-    timerRef.current = setInterval(() => {
-      setElapsedSeconds(Math.floor((Date.now() - startTimeRef.current) / 1000));
-    }, 1000);
+    timerRef.current = setInterval(() => setElapsedSeconds(Math.floor((Date.now() - startTimeRef.current) / 1000)), 1000);
   }, [stopTimer]);
 
-  useEffect(() => { return () => stopTimer(); }, [stopTimer]);
+  useEffect(() => () => stopTimer(), [stopTimer]);
 
   const selectImage = useCallback((url: string, sampleId?: string) => {
-    setImageUrl(url);
-    setSelectedSampleId(sampleId ?? null);
-    setGameStarted(false);
-    setIsComplete(false);
-    setPieces([]);
-    setConfig(null);
-    stopTimer();
-    setElapsedSeconds(0);
+    setImageUrl(url); setSelectedSampleId(sampleId ?? null);
+    setGameStarted(false); setIsComplete(false);
+    setPieces([]); setConfig(null);
+    stopTimer(); setElapsedSeconds(0);
   }, [stopTimer]);
 
-  const handleImageUpload = useCallback((file: File) => {
+  const handleImageFile = useCallback((file: File) => {
     const url = URL.createObjectURL(file);
     selectImage(url);
   }, [selectImage]);
 
   const handleFileChange = useCallback((e: React.ChangeEvent<HTMLInputElement>) => {
-    const file = e.target.files?.[0];
-    if (file) handleImageUpload(file);
-  }, [handleImageUpload]);
+    const f = e.target.files?.[0];
+    if (f) handleImageFile(f);
+  }, [handleImageFile]);
 
   const handleDrop = useCallback((e: React.DragEvent) => {
-    e.preventDefault();
-    setDragOver(false);
-    const file = e.dataTransfer.files[0];
-    if (file && file.type.startsWith('image/')) handleImageUpload(file);
-  }, [handleImageUpload]);
+    e.preventDefault(); setDragOver(false);
+    const f = e.dataTransfer.files[0];
+    if (f?.type.startsWith('image/')) handleImageFile(f);
+  }, [handleImageFile]);
 
   const startGame = useCallback((imgUrl?: string, pieceCount?: number) => {
     const url = imgUrl ?? imageUrl;
@@ -169,57 +183,50 @@ export default function PuzzleGame() {
     if (!url) return;
     const cfg = calculateGrid(count, BOARD_WIDTH, BOARD_HEIGHT);
     const { pieces: newPieces, trayHeight: newTrayH } = createPieces(cfg, BOARD_WIDTH, BOARD_HEIGHT);
-    setConfig(cfg);
-    setPieces(newPieces);
-    setTrayHeight(newTrayH);
-    setGameStarted(true);
-    setIsComplete(false);
-    setCompletedCount(0);
+    setConfig(cfg); setPieces(newPieces); setTrayHeight(newTrayH);
+    setGameStarted(true); setIsComplete(false); setCompletedCount(0);
     if (imgUrl) setImageUrl(imgUrl);
     startTimer();
   }, [imageUrl, selectedPieceCount, startTimer]);
 
+  // Handle URL params on mount
   useEffect(() => {
-    const { image, pieces: p, autostart } = urlParams.current;
-    if (image && autostart) startGame(image, p ?? 9);
+    const { img, pid, pieces: p, autostart } = urlParams.current;
+    if (pid) {
+      setLoading(true);
+      fetchFromApi(pid)
+        .then(data => {
+          setImageUrl(data);
+          if (autostart) startGame(data, p ?? 9);
+        })
+        .catch(() => setLoadError('이미지를 불러올 수 없습니다. 링크가 만료되었을 수 있어요.'))
+        .finally(() => setLoading(false));
+    } else if (img && autostart) {
+      startGame(img, p ?? 9);
+    }
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   const handleComplete = useCallback(() => {
     const elapsed = Math.floor((Date.now() - startTimeRef.current) / 1000);
-    setFinalTime(elapsed);
-    stopTimer();
-    setIsComplete(true);
+    setFinalTime(elapsed); stopTimer(); setIsComplete(true);
   }, [stopTimer]);
 
   const handleNewGame = useCallback(() => {
-    setGameStarted(false);
-    setIsComplete(false);
-    stopTimer();
-    setElapsedSeconds(0);
+    setGameStarted(false); setIsComplete(false); stopTimer(); setElapsedSeconds(0);
   }, [stopTimer]);
 
-  const handleCopyLink = useCallback(() => {
-    navigator.clipboard.writeText(shareUrl).then(() => {
-      setCopied(true);
-      setTimeout(() => setCopied(false), 2000);
-    });
-  }, [shareUrl]);
+  useEffect(() => setCompletedCount(pieces.filter(p => p.isPlaced).length), [pieces]);
 
-  useEffect(() => {
-    setCompletedCount(pieces.filter(p => p.isPlaced).length);
-  }, [pieces]);
-
-  // Admin: handle file upload with compression
+  // ── Admin image upload ──
   const handleAdminFile = useCallback(async (file: File) => {
     if (!file.type.startsWith('image/')) return;
-    setAdminCompressing(true);
-    setAdminLink('');
-    setAdminSampleId(null);
-    setAdminImageUrl('');
+    setAdminCompressing(true); setAdminLink(''); setAdminSampleId(null); setAdminImageUrl('');
     try {
-      const base64 = await compressImageFile(file);
-      setAdminUploadedBase64(base64);
+      const preview = await compressImage(file, 120, 68, 0.7);
+      const full = await compressImage(file, 480, 270, 0.6);
+      setAdminUploadPreview(preview);
+      setAdminUploadBase64(full);
       setAdminUploadName(file.name);
     } finally {
       setAdminCompressing(false);
@@ -227,67 +234,94 @@ export default function PuzzleGame() {
   }, []);
 
   const handleAdminFileChange = useCallback((e: React.ChangeEvent<HTMLInputElement>) => {
-    const file = e.target.files?.[0];
-    if (file) handleAdminFile(file);
+    const f = e.target.files?.[0];
+    if (f) handleAdminFile(f);
     e.target.value = '';
   }, [handleAdminFile]);
 
   const handleAdminDrop = useCallback((e: React.DragEvent) => {
-    e.preventDefault();
-    setAdminDragOver(false);
-    const file = e.dataTransfer.files[0];
-    if (file) handleAdminFile(file);
+    e.preventDefault(); setAdminDragOver(false);
+    const f = e.dataTransfer.files[0];
+    if (f) handleAdminFile(f);
   }, [handleAdminFile]);
 
-  // Admin: generate shareable link
-  const generateAdminLink = useCallback(() => {
+  const generateAdminLink = useCallback(async () => {
     let imgSrc = '';
-    if (adminUploadedBase64) {
-      imgSrc = adminUploadedBase64;
-    } else if (adminSampleId) {
-      imgSrc = SAMPLE_IMAGES.find(s => s.id === adminSampleId)?.url ?? '';
-    } else if (adminImageUrl.trim()) {
-      imgSrc = adminImageUrl.trim();
-    }
+    if (adminUploadBase64) imgSrc = adminUploadBase64;
+    else if (adminSampleId) imgSrc = SAMPLE_IMAGES.find(s => s.id === adminSampleId)?.url ?? '';
+    else if (adminImageUrl.trim()) imgSrc = adminImageUrl.trim();
     if (!imgSrc) return;
-    const base = window.location.origin + window.location.pathname;
-    const link = `${base}?img=${encodeURIComponent(imgSrc)}&pieces=${adminPieces}&autostart=1`;
-    setAdminLink(link);
-  }, [adminUploadedBase64, adminSampleId, adminImageUrl, adminPieces]);
 
-  const copyAdminLink = useCallback(() => {
-    navigator.clipboard.writeText(adminLink).then(() => {
-      setAdminLinkCopied(true);
-      setTimeout(() => setAdminLinkCopied(false), 2000);
-    });
-  }, [adminLink]);
+    setAdminGenerating(true);
+    try {
+      if (adminUploadBase64) {
+        // Try API storage for short link
+        try {
+          const pid = await uploadToApi(adminUploadBase64);
+          setAdminLink(`${baseUrl}?pid=${pid}&pieces=${adminPieces}&autostart=1`);
+          return;
+        } catch {
+          // Fallback: use base64 in URL (may be long)
+          setAdminLink(`${baseUrl}?img=${encodeURIComponent(adminUploadBase64)}&pieces=${adminPieces}&autostart=1`);
+          return;
+        }
+      }
+      // Sample image or URL: short link
+      setAdminLink(`${baseUrl}?img=${encodeURIComponent(imgSrc)}&pieces=${adminPieces}&autostart=1`);
+    } finally {
+      setAdminGenerating(false);
+    }
+  }, [adminUploadBase64, adminSampleId, adminImageUrl, adminPieces, baseUrl]);
 
-  const adminHasImage = !!(adminUploadedBase64 || adminSampleId || adminImageUrl.trim());
+  const adminHasImage = !!(adminUploadBase64 || adminSampleId || adminImageUrl.trim());
+  const linkIsShort = adminLink.length > 0 && adminLink.length < 3500;
 
   const totalPieces = config?.totalPieces ?? 0;
   const progress = totalPieces > 0 ? (completedCount / totalPieces) * 100 : 0;
+
+  // ── Loading / error screen ──
+  if (loading) {
+    return (
+      <div style={{ display: 'flex', height: '100vh', alignItems: 'center', justifyContent: 'center', flexDirection: 'column', gap: 16, background: 'linear-gradient(135deg, #0f1223, #1a1035)', color: '#c084fc' }}>
+        <div style={{ fontSize: 40, animation: 'spin 1s linear infinite' }}>⏳</div>
+        <span style={{ fontWeight: 600 }}>이미지 불러오는 중...</span>
+        <style>{`@keyframes spin { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }`}</style>
+      </div>
+    );
+  }
+
+  if (loadError) {
+    return (
+      <div style={{ display: 'flex', height: '100vh', alignItems: 'center', justifyContent: 'center', flexDirection: 'column', gap: 16, background: 'linear-gradient(135deg, #0f1223, #1a1035)', color: '#fff', padding: 24, textAlign: 'center' }}>
+        <div style={{ fontSize: 40 }}>⚠️</div>
+        <div style={{ fontWeight: 700, fontSize: 18 }}>링크 오류</div>
+        <div style={{ color: 'rgba(255,255,255,0.55)', fontSize: 14 }}>{loadError}</div>
+        <button onClick={() => { setLoadError(''); window.history.replaceState({}, '', window.location.pathname); }} style={{ padding: '10px 24px', background: 'linear-gradient(135deg, #7c3aed, #a855f7)', border: 'none', borderRadius: 10, color: '#fff', fontWeight: 700, fontSize: 14, cursor: 'pointer' }}>홈으로</button>
+      </div>
+    );
+  }
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', height: '100vh', background: 'linear-gradient(135deg, #0f1223 0%, #1a1035 50%, #0f1223 100%)', overflow: 'hidden', fontFamily: 'var(--app-font-sans)', position: 'relative' }}>
 
       {/* ── Header ── */}
-      <div style={{ display: 'flex', alignItems: 'center', padding: '0 12px', height: HEADER_H, background: 'rgba(15,18,35,0.97)', borderBottom: '1px solid rgba(168,85,247,0.3)', gap: 10, flexShrink: 0, zIndex: 100 }}>
-        <div style={{ display: 'flex', alignItems: 'center', gap: 7 }}>
-          <div style={{ width: 30, height: 30, borderRadius: '50%', background: 'linear-gradient(135deg, #a855f7, #7c3aed)', display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 14, boxShadow: '0 0 12px rgba(168,85,247,0.5)', flexShrink: 0 }}>🧩</div>
-          <span style={{ color: '#e2d9f3', fontWeight: 700, fontSize: 15, whiteSpace: 'nowrap' }}>퍼즐 게임</span>
+      <div style={{ display: 'flex', alignItems: 'center', padding: '0 10px', height: HEADER_H, background: 'rgba(15,18,35,0.97)', borderBottom: '1px solid rgba(168,85,247,0.3)', gap: 8, flexShrink: 0, zIndex: 100 }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+          <div style={{ width: 28, height: 28, borderRadius: '50%', background: 'linear-gradient(135deg, #a855f7, #7c3aed)', display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 13, boxShadow: '0 0 10px rgba(168,85,247,0.5)', flexShrink: 0 }}>🧩</div>
+          <span style={{ color: '#e2d9f3', fontWeight: 700, fontSize: 14, whiteSpace: 'nowrap' }}>퍼즐 게임</span>
         </div>
 
         {gameStarted && !isComplete && (
           <>
-            <div style={{ width: 1, height: 18, background: 'rgba(168,85,247,0.3)', flexShrink: 0 }} />
-            <span style={{ color: 'rgba(168,85,247,0.9)', fontSize: 12, fontWeight: 600, whiteSpace: 'nowrap' }}>{completedCount}/{totalPieces}</span>
-            <div style={{ width: 70, height: 5, background: 'rgba(255,255,255,0.1)', borderRadius: 99, overflow: 'hidden', flexShrink: 0 }}>
-              <div style={{ width: `${progress}%`, height: '100%', background: 'linear-gradient(90deg, #7c3aed, #a855f7)', borderRadius: 99, transition: 'width 0.3s', boxShadow: '0 0 6px rgba(168,85,247,0.6)' }} />
+            <div style={{ width: 1, height: 16, background: 'rgba(168,85,247,0.3)', flexShrink: 0 }} />
+            <span style={{ color: 'rgba(168,85,247,0.9)', fontSize: 11, fontWeight: 600, whiteSpace: 'nowrap' }}>{completedCount}/{totalPieces}</span>
+            <div style={{ width: 60, height: 4, background: 'rgba(255,255,255,0.1)', borderRadius: 99, overflow: 'hidden', flexShrink: 0 }}>
+              <div style={{ width: `${progress}%`, height: '100%', background: 'linear-gradient(90deg, #7c3aed, #a855f7)', borderRadius: 99, transition: 'width 0.3s' }} />
             </div>
-            <div style={{ width: 1, height: 18, background: 'rgba(168,85,247,0.3)', flexShrink: 0 }} />
-            <div style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
-              <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="rgba(168,85,247,0.85)" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>
-              <span style={{ color: 'rgba(192,132,252,0.95)', fontSize: 12, fontWeight: 700, fontVariantNumeric: 'tabular-nums', whiteSpace: 'nowrap' }}>{formatTime(elapsedSeconds)}</span>
+            <div style={{ width: 1, height: 16, background: 'rgba(168,85,247,0.3)', flexShrink: 0 }} />
+            <div style={{ display: 'flex', alignItems: 'center', gap: 3 }}>
+              <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="rgba(168,85,247,0.85)" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>
+              <span style={{ color: '#c084fc', fontSize: 12, fontWeight: 700, fontVariantNumeric: 'tabular-nums', whiteSpace: 'nowrap' }}>{formatTime(elapsedSeconds)}</span>
             </div>
           </>
         )}
@@ -296,126 +330,139 @@ export default function PuzzleGame() {
 
         {!gameStarted && (
           <>
-            <button onClick={() => { setShowQr(v => !v); setShowAdmin(false); }} style={{ display: 'flex', alignItems: 'center', gap: 5, padding: '5px 10px', background: showQr ? 'rgba(168,85,247,0.25)' : 'rgba(168,85,247,0.1)', border: '1px solid rgba(168,85,247,0.35)', borderRadius: 7, color: '#c084fc', fontSize: 11, fontWeight: 600, cursor: 'pointer', flexShrink: 0 }}>
-              <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round"><rect x="5" y="2" width="14" height="20" rx="2"/><line x1="12" y1="18" x2="12.01" y2="18"/></svg>
+            <button onClick={() => { setShowQr(v => !v); setShowAdmin(false); }} style={{ display: 'flex', alignItems: 'center', gap: 4, padding: '4px 8px', background: showQr ? 'rgba(168,85,247,0.25)' : 'rgba(168,85,247,0.1)', border: '1px solid rgba(168,85,247,0.35)', borderRadius: 6, color: '#c084fc', fontSize: 11, fontWeight: 600, cursor: 'pointer' }}>
+              <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round"><rect x="5" y="2" width="14" height="20" rx="2"/><line x1="12" y1="18" x2="12.01" y2="18"/></svg>
               QR
             </button>
-            <button onClick={() => { setShowAdmin(v => !v); setShowQr(false); }} style={{ display: 'flex', alignItems: 'center', gap: 5, padding: '5px 10px', background: showAdmin ? 'rgba(168,85,247,0.25)' : 'rgba(168,85,247,0.1)', border: '1px solid rgba(168,85,247,0.35)', borderRadius: 7, color: '#c084fc', fontSize: 11, fontWeight: 600, cursor: 'pointer', flexShrink: 0 }}>
+            <button onClick={() => { setShowAdmin(v => !v); setShowQr(false); }} style={{ display: 'flex', alignItems: 'center', gap: 4, padding: '4px 8px', background: showAdmin ? 'rgba(168,85,247,0.25)' : 'rgba(168,85,247,0.1)', border: '1px solid rgba(168,85,247,0.35)', borderRadius: 6, color: '#c084fc', fontSize: 11, fontWeight: 600, cursor: 'pointer' }}>
               ⚙️ 관리자
             </button>
           </>
         )}
 
         {gameStarted && (
-          <button onClick={handleNewGame} style={{ padding: '5px 12px', background: 'rgba(168,85,247,0.15)', border: '1px solid rgba(168,85,247,0.4)', borderRadius: 7, color: '#c084fc', fontSize: 12, fontWeight: 600, cursor: 'pointer', flexShrink: 0 }}>새 게임</button>
+          <button onClick={handleNewGame} style={{ padding: '4px 10px', background: 'rgba(168,85,247,0.15)', border: '1px solid rgba(168,85,247,0.4)', borderRadius: 6, color: '#c084fc', fontSize: 12, fontWeight: 600, cursor: 'pointer' }}>새 게임</button>
         )}
       </div>
 
       {/* ── QR panel ── */}
       {showQr && !gameStarted && (
-        <div style={{ position: 'absolute', top: HEADER_H + 6, right: 12, zIndex: 200, background: 'rgba(20,15,40,0.98)', border: '1px solid rgba(168,85,247,0.4)', borderRadius: 14, padding: 14, display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 8, boxShadow: '0 8px 32px rgba(0,0,0,0.6)', minWidth: 170 }}>
+        <div style={{ position: 'absolute', top: HEADER_H + 6, right: 10, zIndex: 200, background: 'rgba(20,15,40,0.98)', border: '1px solid rgba(168,85,247,0.4)', borderRadius: 12, padding: 14, display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 8, boxShadow: '0 8px 32px rgba(0,0,0,0.7)', minWidth: 160 }}>
           <span style={{ color: '#c084fc', fontSize: 11, fontWeight: 700 }}>모바일로 열기</span>
-          <img src={`https://api.qrserver.com/v1/create-qr-code/?size=130x130&data=${encodeURIComponent(shareUrl)}&margin=6`} alt="QR" width={130} height={130} style={{ borderRadius: 7, background: '#fff', padding: 3 }} />
-          <button onClick={handleCopyLink} style={{ width: '100%', padding: '5px 0', background: copied ? 'rgba(34,197,94,0.2)' : 'rgba(168,85,247,0.2)', border: `1px solid ${copied ? 'rgba(34,197,94,0.5)' : 'rgba(168,85,247,0.4)'}`, borderRadius: 7, color: copied ? '#4ade80' : '#c084fc', fontSize: 11, fontWeight: 700, cursor: 'pointer' }}>{copied ? '복사됨!' : '링크 복사'}</button>
+          <img src={`https://api.qrserver.com/v1/create-qr-code/?size=130x130&data=${encodeURIComponent(baseUrl)}&margin=6`} alt="QR" width={130} height={130} style={{ borderRadius: 6, background: '#fff', padding: 3 }} />
+          <button onClick={() => { navigator.clipboard.writeText(baseUrl).then(() => { setCopied(true); setTimeout(() => setCopied(false), 2000); }); }} style={{ width: '100%', padding: '5px', background: copied ? 'rgba(34,197,94,0.2)' : 'rgba(168,85,247,0.2)', border: `1px solid ${copied ? 'rgba(34,197,94,0.5)' : 'rgba(168,85,247,0.4)'}`, borderRadius: 6, color: copied ? '#4ade80' : '#c084fc', fontSize: 11, fontWeight: 700, cursor: 'pointer' }}>{copied ? '복사됨!' : '링크 복사'}</button>
         </div>
       )}
 
       {/* ── Admin panel ── */}
       {showAdmin && !gameStarted && (
-        <div style={{ position: 'absolute', top: HEADER_H + 6, right: 12, zIndex: 200, background: 'rgba(20,15,40,0.99)', border: '1px solid rgba(168,85,247,0.45)', borderRadius: 14, padding: 18, display: 'flex', flexDirection: 'column', gap: 14, boxShadow: '0 12px 48px rgba(0,0,0,0.7)', width: 310, maxWidth: 'calc(100vw - 24px)', maxHeight: 'calc(100vh - 80px)', overflowY: 'auto' }}>
-          <div style={{ color: '#e2d9f3', fontWeight: 700, fontSize: 13 }}>⚙️ 관리자 링크 생성</div>
+        <div style={{ position: 'absolute', top: HEADER_H + 6, right: 10, zIndex: 200, background: 'rgba(20,15,40,0.99)', border: '1px solid rgba(168,85,247,0.45)', borderRadius: 14, padding: 16, display: 'flex', flexDirection: 'column', gap: 12, boxShadow: '0 12px 48px rgba(0,0,0,0.7)', width: 300, maxWidth: 'calc(100vw - 20px)', maxHeight: `calc(100vh - ${HEADER_H + 20}px)`, overflowY: 'auto' }}>
+          <div style={{ color: '#e2d9f3', fontWeight: 700, fontSize: 13 }}>⚙️ 플레이어 링크 생성</div>
 
-          {/* Step 1: Image source */}
+          {/* Step 1: Image */}
           <div>
-            <div style={{ color: 'rgba(255,255,255,0.6)', fontSize: 11, fontWeight: 700, marginBottom: 8 }}>1단계 · 이미지 선택</div>
+            <div style={{ color: 'rgba(255,255,255,0.55)', fontSize: 10, fontWeight: 700, marginBottom: 7, letterSpacing: '0.04em' }}>1단계 · 이미지</div>
 
-            {/* Upload area */}
-            <div
-              onDrop={handleAdminDrop}
-              onDragOver={e => { e.preventDefault(); setAdminDragOver(true); }}
-              onDragLeave={() => setAdminDragOver(false)}
-              onClick={() => adminFileInputRef.current?.click()}
-              style={{ border: `2px dashed ${adminDragOver ? 'rgba(168,85,247,0.9)' : adminUploadedBase64 ? 'rgba(168,85,247,0.6)' : 'rgba(168,85,247,0.35)'}`, borderRadius: 10, padding: '10px 12px', cursor: 'pointer', background: adminDragOver ? 'rgba(168,85,247,0.1)' : 'rgba(15,18,35,0.5)', transition: 'all 0.15s', marginBottom: 8 }}
-            >
+            {/* Upload zone */}
+            <div onDrop={handleAdminDrop} onDragOver={e => { e.preventDefault(); setAdminDragOver(true); }} onDragLeave={() => setAdminDragOver(false)} onClick={() => adminFileRef.current?.click()}
+              style={{ border: `2px dashed ${adminDragOver ? 'rgba(168,85,247,0.9)' : adminUploadPreview ? 'rgba(168,85,247,0.6)' : 'rgba(168,85,247,0.3)'}`, borderRadius: 9, padding: '9px 11px', cursor: 'pointer', background: adminDragOver ? 'rgba(168,85,247,0.1)' : 'rgba(15,18,35,0.5)', transition: 'all 0.15s', marginBottom: 7 }}>
               {adminCompressing ? (
-                <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 7, color: '#c084fc', fontSize: 12 }}>
-                  <span style={{ animation: 'spin 1s linear infinite', display: 'inline-block' }}>⏳</span> 압축 중...
+                <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 6, color: '#c084fc', fontSize: 11 }}>
+                  <span style={{ animation: 'spin 1s linear infinite', display: 'inline-block' }}>⏳</span> 처리 중...
                 </div>
-              ) : adminUploadedBase64 ? (
+              ) : adminUploadPreview ? (
                 <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-                  <img src={adminUploadedBase64} alt="uploaded" style={{ width: 56, height: 32, objectFit: 'cover', borderRadius: 5, flexShrink: 0 }} />
+                  <img src={adminUploadPreview} alt="preview" style={{ width: 54, height: 30, objectFit: 'cover', borderRadius: 4, flexShrink: 0 }} />
                   <div style={{ minWidth: 0 }}>
                     <div style={{ color: '#c084fc', fontSize: 11, fontWeight: 600, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{adminUploadName}</div>
-                    <div style={{ color: 'rgba(255,255,255,0.4)', fontSize: 10 }}>클릭하여 변경</div>
+                    <div style={{ color: 'rgba(255,255,255,0.35)', fontSize: 9 }}>클릭하여 변경</div>
                   </div>
                 </div>
               ) : (
-                <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 7 }}>
-                  <span style={{ fontSize: 16 }}>📁</span>
-                  <span style={{ color: 'rgba(255,255,255,0.5)', fontSize: 12, fontWeight: 600 }}>이미지 업로드 (클릭 또는 드래그)</span>
+                <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 6 }}>
+                  <span style={{ fontSize: 14 }}>📁</span>
+                  <span style={{ color: 'rgba(255,255,255,0.45)', fontSize: 11, fontWeight: 600 }}>이미지 업로드 (클릭/드래그)</span>
                 </div>
               )}
             </div>
-            <input ref={adminFileInputRef} type="file" accept="image/*" style={{ display: 'none' }} onChange={handleAdminFileChange} />
+            <input ref={adminFileRef} type="file" accept="image/*" style={{ display: 'none' }} onChange={handleAdminFileChange} />
 
-            {/* OR: sample images */}
-            <div style={{ color: 'rgba(255,255,255,0.35)', fontSize: 10, fontWeight: 600, textAlign: 'center', marginBottom: 7 }}>또는 샘플 선택</div>
-            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: 5 }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 7 }}>
+              <div style={{ flex: 1, height: 1, background: 'rgba(168,85,247,0.15)' }} />
+              <span style={{ color: 'rgba(255,255,255,0.3)', fontSize: 9, fontWeight: 600 }}>또는 샘플</span>
+              <div style={{ flex: 1, height: 1, background: 'rgba(168,85,247,0.15)' }} />
+            </div>
+
+            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: 4 }}>
               {SAMPLE_IMAGES.map(img => (
-                <button key={img.id} onClick={() => { setAdminSampleId(img.id === adminSampleId ? null : img.id); setAdminUploadedBase64(null); setAdminImageUrl(''); setAdminLink(''); }}
-                  style={{ position: 'relative', padding: 0, border: adminSampleId === img.id ? '2px solid rgba(168,85,247,0.9)' : '2px solid transparent', borderRadius: 7, overflow: 'hidden', cursor: 'pointer', background: 'none', aspectRatio: '5/3', boxShadow: adminSampleId === img.id ? '0 0 10px rgba(168,85,247,0.4)' : 'none' }}>
+                <button key={img.id} onClick={() => { setAdminSampleId(img.id === adminSampleId ? null : img.id); setAdminUploadPreview(''); setAdminUploadBase64(''); setAdminImageUrl(''); setAdminLink(''); }}
+                  style={{ position: 'relative', padding: 0, border: adminSampleId === img.id ? '2px solid rgba(168,85,247,0.9)' : '2px solid transparent', borderRadius: 6, overflow: 'hidden', cursor: 'pointer', background: 'none', aspectRatio: '5/3' }}>
                   <img src={img.thumb} alt={img.label} crossOrigin="anonymous" style={{ width: '100%', height: '100%', objectFit: 'cover', display: 'block' }} />
-                  <div style={{ position: 'absolute', inset: 0, background: 'linear-gradient(to top, rgba(0,0,0,0.55) 0%, transparent 60%)', display: 'flex', alignItems: 'flex-end', justifyContent: 'center', paddingBottom: 3 }}>
-                    <span style={{ color: '#fff', fontSize: 9, fontWeight: 600 }}>{img.label}</span>
+                  <div style={{ position: 'absolute', inset: 0, background: 'linear-gradient(to top, rgba(0,0,0,0.6) 0%, transparent 60%)', display: 'flex', alignItems: 'flex-end', justifyContent: 'center', paddingBottom: 2 }}>
+                    <span style={{ color: '#fff', fontSize: 8, fontWeight: 600 }}>{img.label}</span>
                   </div>
                 </button>
               ))}
             </div>
 
-            {/* OR: URL input */}
-            {!adminSampleId && !adminUploadedBase64 && (
-              <div style={{ marginTop: 8 }}>
-                <div style={{ color: 'rgba(255,255,255,0.35)', fontSize: 10, fontWeight: 600, marginBottom: 5, textAlign: 'center' }}>또는 URL 직접 입력</div>
+            {!adminSampleId && !adminUploadPreview && (
+              <div style={{ marginTop: 7 }}>
+                <div style={{ color: 'rgba(255,255,255,0.3)', fontSize: 9, fontWeight: 600, textAlign: 'center', marginBottom: 5 }}>또는 이미지 URL</div>
                 <input type="text" value={adminImageUrl} onChange={e => { setAdminImageUrl(e.target.value); setAdminLink(''); }} placeholder="https://example.com/image.jpg"
-                  style={{ width: '100%', padding: '7px 10px', boxSizing: 'border-box', background: 'rgba(255,255,255,0.06)', border: '1px solid rgba(168,85,247,0.3)', borderRadius: 8, color: '#e2d9f3', fontSize: 11, outline: 'none', fontFamily: 'inherit' }} />
+                  style={{ width: '100%', padding: '6px 9px', boxSizing: 'border-box', background: 'rgba(255,255,255,0.06)', border: '1px solid rgba(168,85,247,0.3)', borderRadius: 7, color: '#e2d9f3', fontSize: 11, outline: 'none', fontFamily: 'inherit' }} />
               </div>
             )}
           </div>
 
           {/* Step 2: Piece count */}
           <div>
-            <div style={{ color: 'rgba(255,255,255,0.6)', fontSize: 11, fontWeight: 700, marginBottom: 8 }}>2단계 · 피스 수 선택</div>
-            <div style={{ display: 'flex', flexWrap: 'wrap', gap: 5 }}>
+            <div style={{ color: 'rgba(255,255,255,0.55)', fontSize: 10, fontWeight: 700, marginBottom: 7, letterSpacing: '0.04em' }}>2단계 · 피스 수</div>
+            <div style={{ display: 'flex', flexWrap: 'wrap', gap: 4 }}>
               {PIECE_COUNTS.map(count => (
                 <button key={count} onClick={() => { setAdminPieces(count); setAdminLink(''); }}
-                  style={{ padding: '4px 10px', borderRadius: 6, border: adminPieces === count ? '1.5px solid rgba(168,85,247,0.9)' : '1px solid rgba(168,85,247,0.2)', background: adminPieces === count ? 'rgba(168,85,247,0.25)' : 'rgba(15,18,35,0.6)', color: adminPieces === count ? '#e2d9f3' : 'rgba(255,255,255,0.45)', fontWeight: adminPieces === count ? 700 : 500, fontSize: 11, cursor: 'pointer' }}>
-                  {count}조각
+                  style={{ padding: '3px 9px', borderRadius: 5, border: adminPieces === count ? '1.5px solid rgba(168,85,247,0.9)' : '1px solid rgba(168,85,247,0.2)', background: adminPieces === count ? 'rgba(168,85,247,0.25)' : 'rgba(15,18,35,0.6)', color: adminPieces === count ? '#e2d9f3' : 'rgba(255,255,255,0.4)', fontWeight: adminPieces === count ? 700 : 400, fontSize: 11, cursor: 'pointer' }}>
+                  {count}
                 </button>
               ))}
             </div>
           </div>
 
-          {/* Generate button */}
-          <button onClick={generateAdminLink} disabled={!adminHasImage}
-            style={{ padding: '10px', background: adminHasImage ? 'linear-gradient(135deg, #7c3aed, #a855f7)' : 'rgba(100,100,100,0.3)', border: 'none', borderRadius: 9, color: adminHasImage ? '#fff' : 'rgba(255,255,255,0.3)', fontSize: 12, fontWeight: 700, cursor: adminHasImage ? 'pointer' : 'not-allowed', boxShadow: adminHasImage ? '0 3px 14px rgba(168,85,247,0.4)' : 'none' }}>
-            🔗 플레이어 링크 생성
+          {/* Generate */}
+          <button onClick={generateAdminLink} disabled={!adminHasImage || adminGenerating}
+            style={{ padding: '9px', background: adminHasImage && !adminGenerating ? 'linear-gradient(135deg, #7c3aed, #a855f7)' : 'rgba(80,80,80,0.3)', border: 'none', borderRadius: 8, color: adminHasImage && !adminGenerating ? '#fff' : 'rgba(255,255,255,0.3)', fontSize: 12, fontWeight: 700, cursor: adminHasImage && !adminGenerating ? 'pointer' : 'not-allowed' }}>
+            {adminGenerating ? '⏳ 생성 중...' : '🔗 플레이어 링크 생성'}
           </button>
 
-          {/* Generated link */}
+          {/* Generated link + QR */}
           {adminLink && (
-            <div style={{ display: 'flex', flexDirection: 'column', gap: 7 }}>
-              <div style={{ color: 'rgba(255,255,255,0.5)', fontSize: 10, fontWeight: 700, letterSpacing: '0.04em' }}>생성된 링크 (플레이어에게 보내세요)</div>
-              <div style={{ background: 'rgba(168,85,247,0.07)', border: '1px solid rgba(168,85,247,0.25)', borderRadius: 8, padding: '7px 10px', color: 'rgba(255,255,255,0.55)', fontSize: 10, wordBreak: 'break-all', lineHeight: 1.5, maxHeight: 60, overflow: 'auto' }}>
-                {adminLink.length > 200 ? adminLink.slice(0, 80) + '…' : adminLink}
-              </div>
-              {adminLink.length > 200 && (
-                <div style={{ color: 'rgba(255,255,255,0.35)', fontSize: 9 }}>* 업로드된 이미지가 링크에 포함되어 링크가 깁니다. 복사 후 공유하세요.</div>
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+              {/* QR code - only for short links */}
+              {linkIsShort ? (
+                <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 6, padding: 10, background: 'rgba(168,85,247,0.07)', border: '1px solid rgba(168,85,247,0.2)', borderRadius: 9 }}>
+                  <span style={{ color: 'rgba(255,255,255,0.5)', fontSize: 9, fontWeight: 700, letterSpacing: '0.06em', textTransform: 'uppercase' }}>QR 코드로 공유</span>
+                  <img
+                    src={`https://api.qrserver.com/v1/create-qr-code/?size=150x150&data=${encodeURIComponent(adminLink)}&margin=6`}
+                    alt="QR" width={150} height={150}
+                    style={{ borderRadius: 6, background: '#fff', padding: 4 }}
+                  />
+                </div>
+              ) : (
+                <div style={{ padding: '7px 9px', background: 'rgba(234,179,8,0.1)', border: '1px solid rgba(234,179,8,0.3)', borderRadius: 7 }}>
+                  <span style={{ color: 'rgba(253,224,71,0.8)', fontSize: 10 }}>📎 업로드 이미지는 링크가 길어 QR 코드 생성이 어렵습니다. 아래 복사 버튼으로 공유해주세요.</span>
+                </div>
               )}
-              <div style={{ display: 'flex', gap: 6 }}>
-                <button onClick={copyAdminLink} style={{ flex: 1, padding: '7px', background: adminLinkCopied ? 'rgba(34,197,94,0.2)' : 'rgba(168,85,247,0.2)', border: `1px solid ${adminLinkCopied ? 'rgba(34,197,94,0.5)' : 'rgba(168,85,247,0.4)'}`, borderRadius: 8, color: adminLinkCopied ? '#4ade80' : '#c084fc', fontSize: 11, fontWeight: 700, cursor: 'pointer' }}>
-                  {adminLinkCopied ? '✓ 복사됨!' : '📋 복사'}
+
+              <div style={{ background: 'rgba(168,85,247,0.06)', border: '1px solid rgba(168,85,247,0.2)', borderRadius: 7, padding: '6px 9px', color: 'rgba(255,255,255,0.5)', fontSize: 9, wordBreak: 'break-all', lineHeight: 1.5, maxHeight: 48, overflow: 'hidden' }}>
+                {adminLink.length > 100 ? adminLink.slice(0, 80) + '…' : adminLink}
+              </div>
+
+              <div style={{ display: 'flex', gap: 5 }}>
+                <button onClick={() => { navigator.clipboard.writeText(adminLink).then(() => { setAdminLinkCopied(true); setTimeout(() => setAdminLinkCopied(false), 2000); }); }}
+                  style={{ flex: 1, padding: '7px', background: adminLinkCopied ? 'rgba(34,197,94,0.2)' : 'rgba(168,85,247,0.2)', border: `1px solid ${adminLinkCopied ? 'rgba(34,197,94,0.5)' : 'rgba(168,85,247,0.4)'}`, borderRadius: 7, color: adminLinkCopied ? '#4ade80' : '#c084fc', fontSize: 11, fontWeight: 700, cursor: 'pointer' }}>
+                  {adminLinkCopied ? '✓ 복사됨!' : '📋 링크 복사'}
                 </button>
-                <button onClick={() => window.open(adminLink, '_blank')} style={{ flex: 1, padding: '7px', background: 'rgba(168,85,247,0.1)', border: '1px solid rgba(168,85,247,0.3)', borderRadius: 8, color: '#c084fc', fontSize: 11, fontWeight: 600, cursor: 'pointer' }}>
+                <button onClick={() => window.open(adminLink, '_blank')}
+                  style={{ flex: 1, padding: '7px', background: 'rgba(168,85,247,0.1)', border: '1px solid rgba(168,85,247,0.3)', borderRadius: 7, color: '#c084fc', fontSize: 11, fontWeight: 600, cursor: 'pointer' }}>
                   👁 미리보기
                 </button>
               </div>
@@ -428,22 +475,22 @@ export default function PuzzleGame() {
 
       {!gameStarted ? (
         /* ── Setup screen ── */
-        <div style={{ flex: 1, display: 'flex', alignItems: 'flex-start', justifyContent: 'center', padding: '14px 12px 32px', overflowY: 'auto' }}>
-          <div style={{ width: '100%', maxWidth: 560, display: 'flex', flexDirection: 'column', gap: 16 }}>
+        <div style={{ flex: 1, display: 'flex', alignItems: 'flex-start', justifyContent: 'center', padding: '12px 12px 28px', overflowY: 'auto' }}>
+          <div style={{ width: '100%', maxWidth: 540, display: 'flex', flexDirection: 'column', gap: 14 }}>
 
             <div>
-              <div style={{ color: '#e2d9f3', fontWeight: 700, fontSize: 13, marginBottom: 10 }}>샘플 이미지 선택</div>
+              <div style={{ color: '#e2d9f3', fontWeight: 700, fontSize: 13, marginBottom: 9 }}>샘플 이미지 선택</div>
               <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: 8 }}>
                 {SAMPLE_IMAGES.map(img => (
                   <button key={img.id} onClick={() => selectImage(img.url, img.id)}
-                    style={{ position: 'relative', padding: 0, border: selectedSampleId === img.id ? '2px solid rgba(168,85,247,0.9)' : '2px solid transparent', borderRadius: 10, overflow: 'hidden', cursor: 'pointer', background: 'none', aspectRatio: '5/3', boxShadow: selectedSampleId === img.id ? '0 0 16px rgba(168,85,247,0.5)' : '0 2px 8px rgba(0,0,0,0.4)', transition: 'all 0.15s ease' }}>
+                    style={{ position: 'relative', padding: 0, border: selectedSampleId === img.id ? '2px solid rgba(168,85,247,0.9)' : '2px solid transparent', borderRadius: 9, overflow: 'hidden', cursor: 'pointer', background: 'none', aspectRatio: '5/3', boxShadow: selectedSampleId === img.id ? '0 0 14px rgba(168,85,247,0.5)' : '0 2px 8px rgba(0,0,0,0.4)', transition: 'all 0.15s' }}>
                     <img src={img.thumb} alt={img.label} crossOrigin="anonymous" style={{ width: '100%', height: '100%', objectFit: 'cover', display: 'block' }} />
-                    <div style={{ position: 'absolute', inset: 0, background: selectedSampleId === img.id ? 'rgba(168,85,247,0.15)' : 'linear-gradient(to top, rgba(0,0,0,0.55) 0%, transparent 60%)', display: 'flex', alignItems: 'flex-end', justifyContent: 'center', paddingBottom: 5 }}>
+                    <div style={{ position: 'absolute', inset: 0, background: selectedSampleId === img.id ? 'rgba(168,85,247,0.12)' : 'linear-gradient(to top, rgba(0,0,0,0.55) 0%, transparent 60%)', display: 'flex', alignItems: 'flex-end', justifyContent: 'center', paddingBottom: 5 }}>
                       <span style={{ color: '#fff', fontSize: 11, fontWeight: 600 }}>{img.label}</span>
                     </div>
                     {selectedSampleId === img.id && (
-                      <div style={{ position: 'absolute', top: 5, right: 5, width: 18, height: 18, background: '#a855f7', borderRadius: '50%', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
-                        <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="#fff" strokeWidth="3" strokeLinecap="round" strokeLinejoin="round"><polyline points="20 6 9 17 4 12"/></svg>
+                      <div style={{ position: 'absolute', top: 5, right: 5, width: 17, height: 17, background: '#a855f7', borderRadius: '50%', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+                        <svg width="9" height="9" viewBox="0 0 24 24" fill="none" stroke="#fff" strokeWidth="3.5" strokeLinecap="round" strokeLinejoin="round"><polyline points="20 6 9 17 4 12"/></svg>
                       </div>
                     )}
                   </button>
@@ -457,22 +504,17 @@ export default function PuzzleGame() {
               <div style={{ flex: 1, height: 1, background: 'rgba(168,85,247,0.2)' }} />
             </div>
 
-            <div
-              onDrop={handleDrop}
-              onDragOver={e => { e.preventDefault(); setDragOver(true); }}
-              onDragLeave={() => setDragOver(false)}
-              onClick={() => fileInputRef.current?.click()}
-              style={{ border: `2px dashed ${dragOver ? 'rgba(168,85,247,0.9)' : selectedSampleId ? 'rgba(168,85,247,0.2)' : 'rgba(168,85,247,0.4)'}`, borderRadius: 12, padding: '14px 12px', textAlign: 'center', cursor: 'pointer', background: dragOver ? 'rgba(168,85,247,0.1)' : 'rgba(15,18,35,0.5)', transition: 'all 0.2s ease' }}
-            >
+            <div onDrop={handleDrop} onDragOver={e => { e.preventDefault(); setDragOver(true); }} onDragLeave={() => setDragOver(false)} onClick={() => fileInputRef.current?.click()}
+              style={{ border: `2px dashed ${dragOver ? 'rgba(168,85,247,0.9)' : selectedSampleId ? 'rgba(168,85,247,0.18)' : 'rgba(168,85,247,0.4)'}`, borderRadius: 11, padding: '13px 12px', textAlign: 'center', cursor: 'pointer', background: dragOver ? 'rgba(168,85,247,0.1)' : 'rgba(15,18,35,0.5)', transition: 'all 0.2s' }}>
               {imageUrl && !selectedSampleId ? (
-                <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 6 }}>
-                  <img src={imageUrl} alt="Uploaded" style={{ maxWidth: '100%', maxHeight: 100, borderRadius: 7, objectFit: 'contain' }} />
+                <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 5 }}>
+                  <img src={imageUrl} alt="Uploaded" style={{ maxWidth: '100%', maxHeight: 90, borderRadius: 6, objectFit: 'contain' }} />
                   <span style={{ color: '#c084fc', fontSize: 11 }}>클릭하여 다른 이미지 선택</span>
                 </div>
               ) : (
                 <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 8 }}>
-                  <span style={{ fontSize: 18 }}>📷</span>
-                  <span style={{ color: selectedSampleId ? 'rgba(255,255,255,0.35)' : '#c084fc', fontWeight: 600, fontSize: 13 }}>내 이미지 업로드</span>
+                  <span style={{ fontSize: 17 }}>📷</span>
+                  <span style={{ color: selectedSampleId ? 'rgba(255,255,255,0.3)' : '#c084fc', fontWeight: 600, fontSize: 13 }}>내 이미지 업로드</span>
                 </div>
               )}
             </div>
@@ -483,7 +525,7 @@ export default function PuzzleGame() {
               <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6 }}>
                 {PIECE_COUNTS.map(count => (
                   <button key={count} onClick={() => setSelectedPieceCount(count)}
-                    style={{ padding: '6px 13px', borderRadius: 8, border: selectedPieceCount === count ? '2px solid rgba(168,85,247,0.9)' : '1px solid rgba(168,85,247,0.25)', background: selectedPieceCount === count ? 'linear-gradient(135deg, rgba(124,58,237,0.4), rgba(168,85,247,0.3))' : 'rgba(15,18,35,0.6)', color: selectedPieceCount === count ? '#e2d9f3' : 'rgba(255,255,255,0.5)', fontWeight: selectedPieceCount === count ? 700 : 500, fontSize: 12, cursor: 'pointer', transition: 'all 0.15s ease', boxShadow: selectedPieceCount === count ? '0 0 12px rgba(168,85,247,0.3)' : 'none' }}>
+                    style={{ padding: '5px 12px', borderRadius: 7, border: selectedPieceCount === count ? '2px solid rgba(168,85,247,0.9)' : '1px solid rgba(168,85,247,0.22)', background: selectedPieceCount === count ? 'linear-gradient(135deg, rgba(124,58,237,0.4), rgba(168,85,247,0.3))' : 'rgba(15,18,35,0.6)', color: selectedPieceCount === count ? '#e2d9f3' : 'rgba(255,255,255,0.45)', fontWeight: selectedPieceCount === count ? 700 : 400, fontSize: 12, cursor: 'pointer', boxShadow: selectedPieceCount === count ? '0 0 10px rgba(168,85,247,0.3)' : 'none' }}>
                     {count}조각
                   </button>
                 ))}
@@ -491,42 +533,66 @@ export default function PuzzleGame() {
             </div>
 
             <button onClick={() => startGame()} disabled={!imageUrl}
-              style={{ padding: '13px', background: imageUrl ? 'linear-gradient(135deg, #7c3aed, #a855f7)' : 'rgba(100,100,100,0.3)', border: 'none', borderRadius: 12, color: imageUrl ? '#fff' : 'rgba(255,255,255,0.4)', fontSize: 15, fontWeight: 700, cursor: imageUrl ? 'pointer' : 'not-allowed', boxShadow: imageUrl ? '0 4px 20px rgba(168,85,247,0.5)' : 'none', transition: 'all 0.2s ease' }}>
+              style={{ padding: '13px', background: imageUrl ? 'linear-gradient(135deg, #7c3aed, #a855f7)' : 'rgba(80,80,80,0.3)', border: 'none', borderRadius: 11, color: imageUrl ? '#fff' : 'rgba(255,255,255,0.35)', fontSize: 15, fontWeight: 700, cursor: imageUrl ? 'pointer' : 'not-allowed', boxShadow: imageUrl ? '0 4px 20px rgba(168,85,247,0.45)' : 'none' }}>
               {imageUrl ? '🧩 게임 시작' : '이미지를 선택하거나 업로드해주세요'}
             </button>
           </div>
         </div>
+
       ) : (
         /* ── Game screen ── */
-        <div style={{ flex: 1, display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'flex-start', overflow: 'hidden', padding: '6px 8px 4px' }}>
-          <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 6, flexShrink: 0 }}>
-            <div style={{ position: 'relative', borderRadius: 7, overflow: 'hidden', border: '1px solid rgba(168,85,247,0.5)', boxShadow: '0 0 16px rgba(168,85,247,0.2)', flexShrink: 0 }}>
-              <img src={imageUrl!} alt="Reference" style={{ width: 120, height: 68, objectFit: 'cover', display: 'block' }} />
-              <div style={{ position: 'absolute', inset: 0, background: 'linear-gradient(to bottom, transparent 55%, rgba(0,0,0,0.5))' }} />
-              <div style={{ position: 'absolute', bottom: 3, left: 0, right: 0, textAlign: 'center', color: 'rgba(255,255,255,0.85)', fontSize: 8, fontWeight: 600, letterSpacing: '0.06em', textTransform: 'uppercase' }}>목표 이미지</div>
+        <div style={{ flex: 1, display: 'flex', flexDirection: 'column', alignItems: 'center', overflow: 'hidden', padding: `${isLandscape ? 4 : 6}px 8px ${isLandscape ? 2 : 4}px` }}>
+
+          {/* Reference image row - compact in landscape */}
+          <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: isLandscape ? 4 : 6, flexShrink: 0 }}>
+            <div style={{ position: 'relative', borderRadius: 6, overflow: 'hidden', border: '1px solid rgba(168,85,247,0.5)', boxShadow: '0 0 12px rgba(168,85,247,0.2)', flexShrink: 0 }}>
+              <img
+                src={imageUrl!}
+                alt="Reference"
+                style={{ width: isLandscape ? 80 : 110, height: isLandscape ? 45 : 62, objectFit: 'cover', display: 'block' }}
+              />
+              <div style={{ position: 'absolute', inset: 0, background: 'linear-gradient(to bottom, transparent 50%, rgba(0,0,0,0.5))' }} />
+              <div style={{ position: 'absolute', bottom: 2, left: 0, right: 0, textAlign: 'center', color: 'rgba(255,255,255,0.85)', fontSize: 7, fontWeight: 700, letterSpacing: '0.06em', textTransform: 'uppercase' }}>목표</div>
             </div>
             {config && (
-              <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
-                <div style={{ display: 'inline-flex', alignItems: 'center', gap: 4, padding: '3px 7px', background: 'rgba(124,58,237,0.2)', borderRadius: 6, border: '1px solid rgba(168,85,247,0.3)' }}>
-                  <span style={{ color: 'rgba(255,255,255,0.45)', fontSize: 10 }}>그리드</span>
-                  <span style={{ color: '#c084fc', fontSize: 11, fontWeight: 700 }}>{config.cols}×{config.rows}</span>
+              <div style={{ display: 'flex', gap: 5 }}>
+                <div style={{ display: 'inline-flex', alignItems: 'center', gap: 3, padding: '2px 6px', background: 'rgba(124,58,237,0.2)', borderRadius: 5, border: '1px solid rgba(168,85,247,0.25)' }}>
+                  <span style={{ color: '#c084fc', fontSize: isLandscape ? 9 : 10, fontWeight: 700 }}>{config.cols}×{config.rows}</span>
                 </div>
-                <div style={{ display: 'inline-flex', alignItems: 'center', gap: 4, padding: '3px 7px', background: 'rgba(124,58,237,0.2)', borderRadius: 6, border: '1px solid rgba(168,85,247,0.3)' }}>
-                  <span style={{ color: 'rgba(255,255,255,0.45)', fontSize: 10 }}>총</span>
-                  <span style={{ color: '#c084fc', fontSize: 11, fontWeight: 700 }}>{config.totalPieces}조각</span>
+                <div style={{ display: 'inline-flex', alignItems: 'center', gap: 3, padding: '2px 6px', background: 'rgba(124,58,237,0.2)', borderRadius: 5, border: '1px solid rgba(168,85,247,0.25)' }}>
+                  <span style={{ color: '#c084fc', fontSize: isLandscape ? 9 : 10, fontWeight: 700 }}>{config.totalPieces}조각</span>
                 </div>
               </div>
             )}
           </div>
 
-          {config && (
-            <div style={{ flexShrink: 0, transform: `scale(${boardScale})`, transformOrigin: 'top center' }}>
-              <PuzzleBoard
-                pieces={pieces} setPieces={setPieces} imageUrl={imageUrl!}
-                config={config} boardWidth={BOARD_WIDTH} boardHeight={BOARD_HEIGHT}
-                trayHeight={trayHeight} onComplete={handleComplete}
-                snappingPieceId={snappingPieceId} setSnappingPieceId={setSnappingPieceId}
-              />
+          {/* ── Board wrapper: outer div = scaled layout dimensions ── */}
+          {config && trayHeight > 0 && (
+            <div
+              style={{
+                width: `${BOARD_WIDTH * boardScale}px`,
+                height: `${totalPlayH * boardScale}px`,
+                position: 'relative',
+                flexShrink: 0,
+                overflow: 'hidden',
+              }}
+            >
+              <div
+                style={{
+                  position: 'absolute',
+                  top: 0,
+                  left: 0,
+                  transformOrigin: 'top left',
+                  transform: `scale(${boardScale})`,
+                }}
+              >
+                <PuzzleBoard
+                  pieces={pieces} setPieces={setPieces} imageUrl={imageUrl!}
+                  config={config} boardWidth={BOARD_WIDTH} boardHeight={BOARD_HEIGHT}
+                  trayHeight={trayHeight} onComplete={handleComplete}
+                  snappingPieceId={snappingPieceId} setSnappingPieceId={setSnappingPieceId}
+                />
+              </div>
             </div>
           )}
         </div>
@@ -535,22 +601,19 @@ export default function PuzzleGame() {
       {/* ── Completion overlay ── */}
       {isComplete && (
         <div style={{ position: 'fixed', inset: 0, display: 'flex', alignItems: 'center', justifyContent: 'center', background: 'rgba(0,0,0,0.75)', backdropFilter: 'blur(10px)', zIndex: 9999, padding: 16 }}>
-          <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 18, padding: '36px 44px', background: 'linear-gradient(135deg, rgba(20,15,40,0.99), rgba(30,20,60,0.99))', borderRadius: 22, border: '2px solid rgba(168,85,247,0.6)', boxShadow: '0 0 80px rgba(168,85,247,0.4), 0 0 160px rgba(124,58,237,0.2)', textAlign: 'center', width: '100%', maxWidth: 320 }}>
-            <div style={{ fontSize: 54 }}>🎉</div>
+          <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 16, padding: isLandscape ? '20px 36px' : '32px 44px', background: 'linear-gradient(135deg, rgba(20,15,40,0.99), rgba(30,20,60,0.99))', borderRadius: 20, border: '2px solid rgba(168,85,247,0.6)', boxShadow: '0 0 80px rgba(168,85,247,0.4)', textAlign: 'center', width: '100%', maxWidth: 300 }}>
+            <div style={{ fontSize: isLandscape ? 40 : 52 }}>🎉</div>
             <div>
-              <div style={{ fontSize: 26, fontWeight: 800, letterSpacing: '-0.02em', background: 'linear-gradient(135deg, #c084fc, #a855f7)', WebkitBackgroundClip: 'text', WebkitTextFillColor: 'transparent', marginBottom: 4 }}>퍼즐 완성!</div>
-              <div style={{ color: 'rgba(255,255,255,0.5)', fontSize: 12 }}>{totalPieces}개 조각을 모두 맞췄어요!</div>
+              <div style={{ fontSize: isLandscape ? 20 : 24, fontWeight: 800, background: 'linear-gradient(135deg, #c084fc, #a855f7)', WebkitBackgroundClip: 'text', WebkitTextFillColor: 'transparent', marginBottom: 3 }}>퍼즐 완성!</div>
+              <div style={{ color: 'rgba(255,255,255,0.45)', fontSize: 11 }}>{totalPieces}개 조각을 모두 맞췄어요!</div>
             </div>
-            <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 4, padding: '12px 24px', background: 'rgba(168,85,247,0.12)', border: '1px solid rgba(168,85,247,0.35)', borderRadius: 12, width: '100%' }}>
-              <span style={{ color: 'rgba(255,255,255,0.45)', fontSize: 9, fontWeight: 600, letterSpacing: '0.08em', textTransform: 'uppercase' }}>완성까지 걸린 시간</span>
-              <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
-                <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="#c084fc" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>
-                <span style={{ color: '#e2d9f3', fontSize: 24, fontWeight: 800, fontVariantNumeric: 'tabular-nums' }}>{formatTime(finalTime)}</span>
-              </div>
+            <div style={{ padding: '10px 20px', background: 'rgba(168,85,247,0.12)', border: '1px solid rgba(168,85,247,0.3)', borderRadius: 10, width: '100%' }}>
+              <div style={{ color: 'rgba(255,255,255,0.4)', fontSize: 9, fontWeight: 600, letterSpacing: '0.08em', textTransform: 'uppercase', marginBottom: 4 }}>완성 시간</div>
+              <span style={{ color: '#e2d9f3', fontSize: isLandscape ? 20 : 24, fontWeight: 800, fontVariantNumeric: 'tabular-nums' }}>{formatTime(finalTime)}</span>
             </div>
-            <div style={{ display: 'flex', gap: 10, width: '100%' }}>
-              <button onClick={() => { setGameStarted(false); setIsComplete(false); stopTimer(); setElapsedSeconds(0); }} style={{ flex: 1, padding: '10px', background: 'rgba(168,85,247,0.2)', border: '1px solid rgba(168,85,247,0.5)', borderRadius: 10, color: '#c084fc', fontSize: 13, fontWeight: 600, cursor: 'pointer' }}>새 이미지</button>
-              <button onClick={() => startGame()} style={{ flex: 1, padding: '10px', background: 'linear-gradient(135deg, #7c3aed, #a855f7)', border: 'none', borderRadius: 10, color: '#fff', fontSize: 13, fontWeight: 700, cursor: 'pointer', boxShadow: '0 4px 18px rgba(168,85,247,0.5)' }}>다시 하기</button>
+            <div style={{ display: 'flex', gap: 8, width: '100%' }}>
+              <button onClick={() => { setGameStarted(false); setIsComplete(false); stopTimer(); setElapsedSeconds(0); }} style={{ flex: 1, padding: '9px', background: 'rgba(168,85,247,0.2)', border: '1px solid rgba(168,85,247,0.5)', borderRadius: 9, color: '#c084fc', fontSize: 13, fontWeight: 600, cursor: 'pointer' }}>새 이미지</button>
+              <button onClick={() => startGame()} style={{ flex: 1, padding: '9px', background: 'linear-gradient(135deg, #7c3aed, #a855f7)', border: 'none', borderRadius: 9, color: '#fff', fontSize: 13, fontWeight: 700, cursor: 'pointer', boxShadow: '0 4px 16px rgba(168,85,247,0.5)' }}>다시 하기</button>
             </div>
           </div>
         </div>
