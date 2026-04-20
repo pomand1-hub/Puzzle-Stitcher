@@ -48,9 +48,7 @@ export async function onRequest(context: any) {
 
     return new Response("Method Not Allowed", {
       status: 405,
-      headers: {
-        Allow: "GET, DELETE",
-      },
+      headers: { Allow: "GET, DELETE" },
     });
   } catch (e: any) {
     return Response.json(
