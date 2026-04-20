@@ -1,4 +1,3 @@
-// force redeploy
 export async function onRequest(context: any) {
   if (context.request.method !== "POST") {
     return new Response("Method Not Allowed", {
