@@ -64,15 +64,49 @@ function compressImage(file: File, maxW: number, maxH: number, quality: number):
   });
 }
 
-async function uploadToApi(base64: string): Promise<string> {
+interface AdminGameRecord {
+  id: string;
+  label: string;
+  thumb: string;
+  pieces: number;
+  createdAt: number;
+  deleteToken: string;
+  link: string;
+  imageType: 'upload' | 'sample' | 'url';
+}
+
+const HISTORY_KEY = 'puzzleAdminHistory_v1';
+
+function loadHistory(): AdminGameRecord[] {
+  try {
+    const raw = localStorage.getItem(HISTORY_KEY);
+    if (!raw) return [];
+    const arr = JSON.parse(raw) as AdminGameRecord[];
+    return Array.isArray(arr) ? arr : [];
+  } catch { return []; }
+}
+
+function saveHistory(list: AdminGameRecord[]) {
+  try { localStorage.setItem(HISTORY_KEY, JSON.stringify(list)); } catch { /* quota exceeded */ }
+}
+
+async function uploadToApi(base64: string): Promise<{ id: string; deleteToken: string }> {
   const res = await fetch('/api/puzzle-images', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ data: base64 }),
   });
-  if (!res.ok) throw new Error('Upload failed');
-  const json = await res.json() as { id: string };
-  return json.id;
+  if (res.status === 429) throw new Error('서버가 혼잡합니다. 잠시 후 다시 시도해주세요.');
+  if (!res.ok) throw new Error('업로드에 실패했습니다.');
+  return await res.json() as { id: string; deleteToken: string };
+}
+
+async function deleteFromApi(id: string, token: string): Promise<void> {
+  const res = await fetch(`/api/puzzle-images/${id}`, {
+    method: 'DELETE',
+    headers: { Authorization: `Bearer ${token}` },
+  });
+  if (!res.ok && res.status !== 404) throw new Error('삭제에 실패했습니다.');
 }
 
 async function fetchFromApi(pid: string): Promise<string> {
@@ -122,6 +156,9 @@ export default function PuzzleGame() {
   const [adminLink, setAdminLink] = useState('');
   const [adminLinkCopied, setAdminLinkCopied] = useState(false);
   const [adminGenerating, setAdminGenerating] = useState(false);
+  const [adminError, setAdminError] = useState('');
+  const [adminHistory, setAdminHistory] = useState<AdminGameRecord[]>(() => loadHistory());
+  const [deletingId, setDeletingId] = useState<string | null>(null);
   const adminFileRef = useRef<HTMLInputElement>(null);
 
   const vp = useViewport();
@@ -247,31 +284,85 @@ export default function PuzzleGame() {
 
   const generateAdminLink = useCallback(async () => {
     let imgSrc = '';
-    if (adminUploadBase64) imgSrc = adminUploadBase64;
-    else if (adminSampleId) imgSrc = SAMPLE_IMAGES.find(s => s.id === adminSampleId)?.url ?? '';
-    else if (adminImageUrl.trim()) imgSrc = adminImageUrl.trim();
+    let label = '';
+    let thumb = '';
+    let imageType: 'upload' | 'sample' | 'url' = 'url';
+
+    if (adminUploadBase64) {
+      imgSrc = adminUploadBase64;
+      label = adminUploadName || '업로드 이미지';
+      thumb = adminUploadPreview;
+      imageType = 'upload';
+    } else if (adminSampleId) {
+      const s = SAMPLE_IMAGES.find(x => x.id === adminSampleId);
+      if (s) { imgSrc = s.url; label = `샘플 · ${s.label}`; thumb = s.thumb; imageType = 'sample'; }
+    } else if (adminImageUrl.trim()) {
+      imgSrc = adminImageUrl.trim();
+      label = 'URL 이미지';
+      thumb = imgSrc;
+      imageType = 'url';
+    }
     if (!imgSrc) return;
 
     setAdminGenerating(true);
+    setAdminError('');
     try {
-      if (adminUploadBase64) {
-        // Try API storage for short link
-        try {
-          const pid = await uploadToApi(adminUploadBase64);
-          setAdminLink(`${baseUrl}?pid=${pid}&pieces=${adminPieces}&autostart=1`);
-          return;
-        } catch {
-          // Fallback: use base64 in URL (may be long)
-          setAdminLink(`${baseUrl}?img=${encodeURIComponent(adminUploadBase64)}&pieces=${adminPieces}&autostart=1`);
-          return;
+      let link = '';
+      let deleteToken = '';
+      let id = '';
+
+      // 업로드/URL/샘플 모두 API에 저장하여 짧은 ID 발급 → 관리자 토큰으로 삭제 가능
+      try {
+        if (adminUploadBase64) {
+          const r = await uploadToApi(adminUploadBase64);
+          id = r.id; deleteToken = r.deleteToken;
+          link = `${baseUrl}?pid=${id}&pieces=${adminPieces}&autostart=1`;
+        } else {
+          // 샘플/URL은 짧으므로 그대로 사용 (서버 저장 불필요)
+          link = `${baseUrl}?img=${encodeURIComponent(imgSrc)}&pieces=${adminPieces}&autostart=1`;
+        }
+      } catch (e) {
+        const msg = e instanceof Error ? e.message : '업로드 실패';
+        setAdminError(msg);
+        // Fallback: base64 URL (긴 링크지만 작동은 함)
+        if (adminUploadBase64) {
+          link = `${baseUrl}?img=${encodeURIComponent(adminUploadBase64)}&pieces=${adminPieces}&autostart=1`;
         }
       }
-      // Sample image or URL: short link
-      setAdminLink(`${baseUrl}?img=${encodeURIComponent(imgSrc)}&pieces=${adminPieces}&autostart=1`);
+
+      setAdminLink(link);
+
+      // 히스토리 저장 (관리자가 삭제 전까지 영구 유지)
+      const record: AdminGameRecord = {
+        id: id || `local-${Date.now()}`,
+        label, thumb, pieces: adminPieces,
+        createdAt: Date.now(), deleteToken, link, imageType,
+      };
+      const updated = [record, ...adminHistory].slice(0, 50);
+      setAdminHistory(updated);
+      saveHistory(updated);
     } finally {
       setAdminGenerating(false);
     }
-  }, [adminUploadBase64, adminSampleId, adminImageUrl, adminPieces, baseUrl]);
+  }, [adminUploadBase64, adminUploadName, adminUploadPreview, adminSampleId, adminImageUrl, adminPieces, baseUrl, adminHistory]);
+
+  const deleteAdminGame = useCallback(async (record: AdminGameRecord) => {
+    if (!confirm(`"${record.label}" 게임을 삭제하시겠습니까?\n링크가 즉시 무효화됩니다.`)) return;
+    setDeletingId(record.id);
+    try {
+      if (record.deleteToken && !record.id.startsWith('local-')) {
+        await deleteFromApi(record.id, record.deleteToken);
+      }
+      const updated = adminHistory.filter(r => r.id !== record.id);
+      setAdminHistory(updated);
+      saveHistory(updated);
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : '삭제 실패';
+      setAdminError(msg);
+    } finally {
+      setDeletingId(null);
+    }
+  }, [adminHistory]);
 
   const adminHasImage = !!(adminUploadBase64 || adminSampleId || adminImageUrl.trim());
   const linkIsShort = adminLink.length > 0 && adminLink.length < 3500;
@@ -433,6 +524,12 @@ export default function PuzzleGame() {
             {adminGenerating ? '⏳ 생성 중...' : '🔗 플레이어 링크 생성'}
           </button>
 
+          {adminError && (
+            <div style={{ padding: '7px 9px', background: 'rgba(239,68,68,0.1)', border: '1px solid rgba(239,68,68,0.35)', borderRadius: 7, color: '#fca5a5', fontSize: 11 }}>
+              ⚠️ {adminError}
+            </div>
+          )}
+
           {/* Generated link + QR */}
           {adminLink && (
             <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
@@ -465,6 +562,68 @@ export default function PuzzleGame() {
                   style={{ flex: 1, padding: '7px', background: 'rgba(168,85,247,0.1)', border: '1px solid rgba(168,85,247,0.3)', borderRadius: 7, color: '#c084fc', fontSize: 11, fontWeight: 600, cursor: 'pointer' }}>
                   👁 미리보기
                 </button>
+              </div>
+            </div>
+          )}
+
+          {/* ── 내가 만든 게임 목록 (영구 보관, 관리자만 삭제 가능) ── */}
+          {adminHistory.length > 0 && (
+            <div style={{ borderTop: '1px solid rgba(168,85,247,0.18)', paddingTop: 11, marginTop: 2 }}>
+              <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 8 }}>
+                <span style={{ color: 'rgba(255,255,255,0.55)', fontSize: 10, fontWeight: 700, letterSpacing: '0.04em' }}>
+                  📦 내가 만든 게임 ({adminHistory.length})
+                </span>
+                {adminHistory.length > 3 && (
+                  <button
+                    onClick={() => {
+                      if (confirm(`전체 ${adminHistory.length}개 게임을 모두 삭제하시겠습니까?`)) {
+                        adminHistory.forEach(r => {
+                          if (r.deleteToken && !r.id.startsWith('local-')) {
+                            deleteFromApi(r.id, r.deleteToken).catch(() => {});
+                          }
+                        });
+                        setAdminHistory([]); saveHistory([]);
+                      }
+                    }}
+                    style={{ padding: '2px 7px', background: 'rgba(239,68,68,0.1)', border: '1px solid rgba(239,68,68,0.3)', borderRadius: 5, color: '#fca5a5', fontSize: 9, fontWeight: 600, cursor: 'pointer' }}>
+                    전체 삭제
+                  </button>
+                )}
+              </div>
+
+              <div style={{ display: 'flex', flexDirection: 'column', gap: 6, maxHeight: 280, overflowY: 'auto' }}>
+                {adminHistory.map(record => {
+                  const ago = Math.floor((Date.now() - record.createdAt) / 60000);
+                  const agoText = ago < 1 ? '방금' : ago < 60 ? `${ago}분 전` : ago < 1440 ? `${Math.floor(ago/60)}시간 전` : `${Math.floor(ago/1440)}일 전`;
+                  return (
+                    <div key={record.id} style={{ display: 'flex', alignItems: 'center', gap: 7, padding: 7, background: 'rgba(168,85,247,0.06)', border: '1px solid rgba(168,85,247,0.18)', borderRadius: 8 }}>
+                      <img src={record.thumb} alt="" crossOrigin="anonymous" style={{ width: 38, height: 22, objectFit: 'cover', borderRadius: 3, flexShrink: 0, background: 'rgba(0,0,0,0.3)' }} />
+                      <div style={{ flex: 1, minWidth: 0 }}>
+                        <div style={{ color: '#e2d9f3', fontSize: 10.5, fontWeight: 600, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{record.label}</div>
+                        <div style={{ color: 'rgba(255,255,255,0.4)', fontSize: 9 }}>{record.pieces}조각 · {agoText}</div>
+                      </div>
+                      <button
+                        onClick={() => { navigator.clipboard.writeText(record.link); }}
+                        title="링크 복사"
+                        style={{ width: 24, height: 24, padding: 0, background: 'rgba(168,85,247,0.15)', border: '1px solid rgba(168,85,247,0.3)', borderRadius: 5, color: '#c084fc', fontSize: 11, cursor: 'pointer', flexShrink: 0 }}>
+                        📋
+                      </button>
+                      <button
+                        onClick={() => window.open(record.link, '_blank')}
+                        title="열기"
+                        style={{ width: 24, height: 24, padding: 0, background: 'rgba(168,85,247,0.15)', border: '1px solid rgba(168,85,247,0.3)', borderRadius: 5, color: '#c084fc', fontSize: 11, cursor: 'pointer', flexShrink: 0 }}>
+                        ↗
+                      </button>
+                      <button
+                        onClick={() => deleteAdminGame(record)}
+                        disabled={deletingId === record.id}
+                        title="삭제"
+                        style={{ width: 24, height: 24, padding: 0, background: 'rgba(239,68,68,0.12)', border: '1px solid rgba(239,68,68,0.3)', borderRadius: 5, color: '#fca5a5', fontSize: 11, cursor: deletingId === record.id ? 'wait' : 'pointer', flexShrink: 0, opacity: deletingId === record.id ? 0.5 : 1 }}>
+                        {deletingId === record.id ? '⏳' : '🗑'}
+                      </button>
+                    </div>
+                  );
+                })}
               </div>
             </div>
           )}

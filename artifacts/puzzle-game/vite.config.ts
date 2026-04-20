@@ -57,6 +57,20 @@ export default defineConfig({
   build: {
     outDir: path.resolve(import.meta.dirname, "dist/public"),
     emptyOutDir: true,
+    minify: "esbuild",
+    cssMinify: true,
+    target: "es2020",
+    sourcemap: false,
+    reportCompressedSize: false,
+    chunkSizeWarningLimit: 600,
+    rollupOptions: {
+      output: {
+        manualChunks: {
+          // vendor 코드를 별도 청크로 → 브라우저 캐시 활용 → 재방문 시 빠름
+          "react-vendor": ["react", "react-dom"],
+        },
+      },
+    },
   },
   server: {
     port,

@@ -28,10 +28,10 @@ app.use(express.json({ limit: "12mb" }));
 app.use(express.urlencoded({ extended: true, limit: "12mb" }));
 
 // ── Rate Limiting: 400명 동시 접속 대비 ──
-// 이미지 업로드 (무거운 작업): IP당 분당 30회
+// 이미지 업로드 (무거운 작업): IP당 분당 60회
 const uploadLimiter = rateLimit({
   windowMs: 60 * 1000,
-  max: 30,
+  max: 60,
   standardHeaders: "draft-8",
   legacyHeaders: false,
   handler(_req: Request, res: Response) {
@@ -42,10 +42,10 @@ const uploadLimiter = rateLimit({
   },
 });
 
-// 이미지 조회 (가벼운 작업): IP당 분당 300회
+// 이미지 조회 (가벼운 작업): IP당 분당 600회
 const readLimiter = rateLimit({
   windowMs: 60 * 1000,
-  max: 300,
+  max: 600,
   standardHeaders: "draft-8",
   legacyHeaders: false,
   handler(_req: Request, res: Response) {
@@ -56,10 +56,10 @@ const readLimiter = rateLimit({
   },
 });
 
-// 전체 API 보호: IP당 분당 600회
+// 전체 API 보호: IP당 분당 1200회 (500명 동시 접속 대비)
 const globalLimiter = rateLimit({
   windowMs: 60 * 1000,
-  max: 600,
+  max: 1200,
   standardHeaders: "draft-8",
   legacyHeaders: false,
   handler(_req: Request, res: Response) {
@@ -74,6 +74,7 @@ app.use("/api", globalLimiter);
 app.use("/api/puzzle-images", (req: Request, res: Response, next: NextFunction) => {
   if (req.method === "POST") return uploadLimiter(req, res, next);
   if (req.method === "GET") return readLimiter(req, res, next);
+  if (req.method === "DELETE") return uploadLimiter(req, res, next);
   next();
 });
 
