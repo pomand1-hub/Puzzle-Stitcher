@@ -1,3 +1,4 @@
+//force deploy
 async function readStoredObject(context: any, key: string) {
   const object = await context.env.PUZZLE_IMAGES.get(key);
   if (!object) return null;
