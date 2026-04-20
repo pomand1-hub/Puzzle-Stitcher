@@ -18,13 +18,8 @@ if (Number.isNaN(port) || port <= 0) {
   throw new Error(`Invalid PORT value: "${rawPort}"`);
 }
 
-const basePath = process.env.BASE_PATH;
-
-if (!basePath) {
-  throw new Error(
-    "BASE_PATH environment variable is required but was not provided.",
-  );
-}
+// 🔥 수정됨 (BASE_PATH 제거)
+const basePath = "/";
 
 export default defineConfig({
   base: basePath,
@@ -49,13 +44,19 @@ export default defineConfig({
   resolve: {
     alias: {
       "@": path.resolve(import.meta.dirname, "src"),
-      "@assets": path.resolve(import.meta.dirname, "..", "..", "attached_assets"),
+      "@assets": path.resolve(
+        import.meta.dirname,
+        "..",
+        "..",
+        "attached_assets",
+      ),
     },
     dedupe: ["react", "react-dom"],
   },
   root: path.resolve(import.meta.dirname),
   build: {
-    outDir: path.resolve(import.meta.dirname, "dist/public"),
+    // 🔥 핵심 수정 (dist/public → dist)
+    outDir: path.resolve(import.meta.dirname, "dist"),
     emptyOutDir: true,
     minify: "esbuild",
     cssMinify: true,
@@ -66,7 +67,6 @@ export default defineConfig({
     rollupOptions: {
       output: {
         manualChunks: {
-          // vendor 코드를 별도 청크로 → 브라우저 캐시 활용 → 재방문 시 빠름
           "react-vendor": ["react", "react-dom"],
         },
       },
