@@ -6,58 +6,55 @@ async function readStoredObject(context: any, key: string) {
   return JSON.parse(text);
 }
 
-export async function onRequestGet(context: any) {
-  try {
-    const key = context.params.key;
+export async function onRequest(context: any) {
+  const method = context.request.method;
+  const key = context.params.key;
 
-    if (!key) {
-      return Response.json({ error: "Key 없음" }, { status: 400 });
-    }
-
-    const stored = await readStoredObject(context, key);
-
-    if (!stored) {
-      return Response.json({ error: "Not found" }, { status: 404 });
-    }
-
-    return Response.json({
-      data: stored.data,
-    });
-  } catch (e: any) {
-    return Response.json(
-      { error: e?.message || "이미지 불러오기 실패" },
-      { status: 500 }
-    );
+  if (!key) {
+    return Response.json({ error: "Key 없음" }, { status: 400 });
   }
-}
 
-export async function onRequestDelete(context: any) {
   try {
-    const key = context.params.key;
+    if (method === "GET") {
+      const stored = await readStoredObject(context, key);
 
-    if (!key) {
-      return Response.json({ error: "Key 없음" }, { status: 400 });
+      if (!stored) {
+        return Response.json({ error: "Not found" }, { status: 404 });
+      }
+
+      return Response.json({
+        data: stored.data,
+      });
     }
 
-    const auth = context.request.headers.get("Authorization") || "";
-    const token = auth.startsWith("Bearer ") ? auth.slice(7) : "";
+    if (method === "DELETE") {
+      const auth = context.request.headers.get("Authorization") || "";
+      const token = auth.startsWith("Bearer ") ? auth.slice(7) : "";
 
-    const stored = await readStoredObject(context, key);
+      const stored = await readStoredObject(context, key);
 
-    if (!stored) {
+      if (!stored) {
+        return Response.json({ success: true });
+      }
+
+      if (!token || token !== stored.deleteToken) {
+        return Response.json({ error: "삭제 권한 없음" }, { status: 401 });
+      }
+
+      await context.env.PUZZLE_IMAGES.delete(key);
+
       return Response.json({ success: true });
     }
 
-    if (!token || token !== stored.deleteToken) {
-      return Response.json({ error: "삭제 권한 없음" }, { status: 401 });
-    }
-
-    await context.env.PUZZLE_IMAGES.delete(key);
-
-    return Response.json({ success: true });
+    return new Response("Method Not Allowed", {
+      status: 405,
+      headers: {
+        Allow: "GET, DELETE",
+      },
+    });
   } catch (e: any) {
     return Response.json(
-      { error: e?.message || "삭제 실패" },
+      { error: e?.message || "처리 실패" },
       { status: 500 }
     );
   }
