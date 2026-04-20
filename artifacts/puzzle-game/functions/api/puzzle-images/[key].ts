@@ -1,15 +1,9 @@
-type StoreValue = {
-  data: string;
-  createdAt: number;
-  deleteToken: string;
-};
-
-async function readStoredObject(context: any, key: string): Promise<StoreValue | null> {
+async function readStoredObject(context: any, key: string) {
   const object = await context.env.PUZZLE_IMAGES.get(key);
   if (!object) return null;
 
   const text = await object.text();
-  return JSON.parse(text) as StoreValue;
+  return JSON.parse(text);
 }
 
 export async function onRequestGet(context: any) {
