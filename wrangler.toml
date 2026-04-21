@@ -1,5 +1,6 @@
 name = "puzzle-stitcher"
 compatibility_date = "2024-04-20"
+pages_build_output_dir = "artifacts/puzzle-game/dist"
 
 [[r2_buckets]]
 binding = "PUZZLE_IMAGES"
