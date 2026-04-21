@@ -118,6 +118,8 @@ async function fetchFromApi(pid: string): Promise<string> {
 
 export default function PuzzleGame() {
   const urlParams = useRef(getUrlParams());
+  // 👉 추가된 부분: 공유 링크(참가자)인지 확인하는 변수
+  const isSharedLink = urlParams.current.autostart; 
 
   const [imageUrl, setImageUrl] = useState<string | null>(() => urlParams.current.img);
   const [selectedSampleId, setSelectedSampleId] = useState<string | null>(() => {
@@ -311,20 +313,17 @@ export default function PuzzleGame() {
       let deleteToken = '';
       let id = '';
 
-      // 업로드/URL/샘플 모두 API에 저장하여 짧은 ID 발급 → 관리자 토큰으로 삭제 가능
       try {
         if (adminUploadBase64) {
           const r = await uploadToApi(adminUploadBase64);
           id = r.id; deleteToken = r.deleteToken;
           link = `${baseUrl}?pid=${id}&pieces=${adminPieces}&autostart=1`;
         } else {
-          // 샘플/URL은 짧으므로 그대로 사용 (서버 저장 불필요)
           link = `${baseUrl}?img=${encodeURIComponent(imgSrc)}&pieces=${adminPieces}&autostart=1`;
         }
       } catch (e) {
         const msg = e instanceof Error ? e.message : '업로드 실패';
         setAdminError(msg);
-        // Fallback: base64 URL (긴 링크지만 작동은 함)
         if (adminUploadBase64) {
           link = `${baseUrl}?img=${encodeURIComponent(adminUploadBase64)}&pieces=${adminPieces}&autostart=1`;
         }
@@ -332,7 +331,6 @@ export default function PuzzleGame() {
 
       setAdminLink(link);
 
-      // 히스토리 저장 (관리자가 삭제 전까지 영구 유지)
       const record: AdminGameRecord = {
         id: id || `local-${Date.now()}`,
         label, thumb, pieces: adminPieces,
@@ -431,7 +429,8 @@ export default function PuzzleGame() {
           </>
         )}
 
-        {gameStarted && (
+        {/* 👉 추가된 부분: isSharedLink가 아닐 때만 새 게임 버튼 표시 */}
+        {gameStarted && !isSharedLink && (
           <button onClick={handleNewGame} style={{ padding: '4px 10px', background: 'rgba(168,85,247,0.15)', border: '1px solid rgba(168,85,247,0.4)', borderRadius: 6, color: '#c084fc', fontSize: 12, fontWeight: 600, cursor: 'pointer' }}>새 게임</button>
         )}
       </div>
@@ -692,7 +691,7 @@ export default function PuzzleGame() {
             </div>
 
             <button onClick={() => startGame()} disabled={!imageUrl}
-              style={{ padding: '13px', background: imageUrl ? 'linear-gradient(135deg, #7c3aed, #a855f7)' : 'rgba(80,80,80,0.3)', border: 'none', borderRadius: 11, color: imageUrl ? '#fff' : 'rgba(255,255,255,0.35)', fontSize: 15, fontWeight: 700, cursor: imageUrl ? 'pointer' : 'not-allowed', boxShadow: imageUrl ? '0 4px 20px rgba(168,85,247,0.45)' : 'none' }}>
+              style={{ padding: '13px', background: imageUrl ? 'linear-gradient(135deg, #7c3aed, #a855f7)' : 'rgba(80,80,80,0.3)', border: 'none', borderRadius: 11, color: imageUrl ? '#fff' : 'rgba(255,255,255,0.35)', fontSize: 15, fontWeight: 700, cursor: imageUrl ? 'pointer', boxShadow: imageUrl ? '0 4px 20px rgba(168,85,247,0.45)' : 'none' }}>
               {imageUrl ? '🧩 게임 시작' : '이미지를 선택하거나 업로드해주세요'}
             </button>
           </div>
@@ -771,7 +770,12 @@ export default function PuzzleGame() {
               <span style={{ color: '#e2d9f3', fontSize: isLandscape ? 20 : 24, fontWeight: 800, fontVariantNumeric: 'tabular-nums' }}>{formatTime(finalTime)}</span>
             </div>
             <div style={{ display: 'flex', gap: 8, width: '100%' }}>
-              <button onClick={() => { setGameStarted(false); setIsComplete(false); stopTimer(); setElapsedSeconds(0); }} style={{ flex: 1, padding: '9px', background: 'rgba(168,85,247,0.2)', border: '1px solid rgba(168,85,247,0.5)', borderRadius: 9, color: '#c084fc', fontSize: 13, fontWeight: 600, cursor: 'pointer' }}>새 이미지</button>
+
+              {/* 👉 추가된 부분: isSharedLink가 아닐 때만 새 이미지 버튼 표시 */}
+              {!isSharedLink && (
+                <button onClick={() => { setGameStarted(false); setIsComplete(false); stopTimer(); setElapsedSeconds(0); }} style={{ flex: 1, padding: '9px', background: 'rgba(168,85,247,0.2)', border: '1px solid rgba(168,85,247,0.5)', borderRadius: 9, color: '#c084fc', fontSize: 13, fontWeight: 600, cursor: 'pointer' }}>새 이미지</button>
+              )}
+
               <button onClick={() => startGame()} style={{ flex: 1, padding: '9px', background: 'linear-gradient(135deg, #7c3aed, #a855f7)', border: 'none', borderRadius: 9, color: '#fff', fontSize: 13, fontWeight: 700, cursor: 'pointer', boxShadow: '0 4px 16px rgba(168,85,247,0.5)' }}>다시 하기</button>
             </div>
           </div>
