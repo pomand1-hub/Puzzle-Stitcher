@@ -118,7 +118,7 @@ async function fetchFromApi(pid: string): Promise<string> {
 
 export default function PuzzleGame() {
   const urlParams = useRef(getUrlParams());
-  // 👉 추가된 부분: 공유 링크(참가자)인지 확인하는 변수
+  // 👉 공유 링크(참가자)인지 확인하는 변수
   const isSharedLink = urlParams.current.autostart; 
 
   const [imageUrl, setImageUrl] = useState<string | null>(() => urlParams.current.img);
@@ -429,7 +429,7 @@ export default function PuzzleGame() {
           </>
         )}
 
-        {/* 👉 추가된 부분: isSharedLink가 아닐 때만 새 게임 버튼 표시 */}
+        {/* 👉 공유 링크가 아닐 때만 새 게임 버튼 표시 */}
         {gameStarted && !isSharedLink && (
           <button onClick={handleNewGame} style={{ padding: '4px 10px', background: 'rgba(168,85,247,0.15)', border: '1px solid rgba(168,85,247,0.4)', borderRadius: 6, color: '#c084fc', fontSize: 12, fontWeight: 600, cursor: 'pointer' }}>새 게임</button>
         )}
@@ -691,7 +691,7 @@ export default function PuzzleGame() {
             </div>
 
             <button onClick={() => startGame()} disabled={!imageUrl}
-              style={{ padding: '13px', background: imageUrl ? 'linear-gradient(135deg, #7c3aed, #a855f7)' : 'rgba(80,80,80,0.3)', border: 'none', borderRadius: 11, color: imageUrl ? '#fff' : 'rgba(255,255,255,0.35)', fontSize: 15, fontWeight: 700, cursor: imageUrl ? 'pointer', boxShadow: imageUrl ? '0 4px 20px rgba(168,85,247,0.45)' : 'none' }}>
+              style={{ padding: '13px', background: imageUrl ? 'linear-gradient(135deg, #7c3aed, #a855f7)' : 'rgba(80,80,80,0.3)', border: 'none', borderRadius: 11, color: imageUrl ? '#fff' : 'rgba(255,255,255,0.35)', fontSize: 15, fontWeight: 700, cursor: imageUrl ? 'pointer' : 'not-allowed', boxShadow: imageUrl ? '0 4px 20px rgba(168,85,247,0.45)' : 'none' }}>
               {imageUrl ? '🧩 게임 시작' : '이미지를 선택하거나 업로드해주세요'}
             </button>
           </div>
@@ -771,7 +771,7 @@ export default function PuzzleGame() {
             </div>
             <div style={{ display: 'flex', gap: 8, width: '100%' }}>
 
-              {/* 👉 추가된 부분: isSharedLink가 아닐 때만 새 이미지 버튼 표시 */}
+              {/* 👉 공유 링크가 아닐 때만 새 이미지 버튼 표시 */}
               {!isSharedLink && (
                 <button onClick={() => { setGameStarted(false); setIsComplete(false); stopTimer(); setElapsedSeconds(0); }} style={{ flex: 1, padding: '9px', background: 'rgba(168,85,247,0.2)', border: '1px solid rgba(168,85,247,0.5)', borderRadius: 9, color: '#c084fc', fontSize: 13, fontWeight: 600, cursor: 'pointer' }}>새 이미지</button>
               )}
