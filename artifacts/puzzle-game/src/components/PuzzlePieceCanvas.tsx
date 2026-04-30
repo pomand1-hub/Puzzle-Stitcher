@@ -40,6 +40,8 @@ export const PuzzlePieceCanvas: React.FC<PuzzlePieceCanvasProps> = ({
     if (!ctx) return;
 
     const img = new Image();
+    // 👉 CORS 에러 방지용 안전장치 추가
+    img.crossOrigin = 'anonymous'; 
     img.src = imageUrl;
 
     const draw = () => {
@@ -54,25 +56,17 @@ export const PuzzlePieceCanvas: React.FC<PuzzlePieceCanvasProps> = ({
       ctx.save();
       ctx.clip(clipPath);
 
-      const imgW = img.naturalWidth || boardWidth;
-      const imgH = img.naturalHeight || boardHeight;
-
-      const srcX = (col / config.cols) * imgW;
-      const srcY = (row / config.rows) * imgH;
-      const srcPw = imgW / config.cols;
-      const srcPh = imgH / config.rows;
-
+      // 🚀 아이폰 사파리 버그 해결의 핵심 부분!
+      // 마이너스(-) 원본 좌표를 쓰면 사파리가 터지므로, 
+      // 전체 이미지를 통째로 깔고 위치만 이동시켜서 가위선(Clip)으로 오려냅니다.
       ctx.drawImage(
         img,
-        srcX - (tabW / pw) * srcPw,
-        srcY - (tabH / ph) * srcPh,
-        srcPw * (canvasW / pw),
-        srcPh * (canvasH / ph),
-        -tabW,
-        -tabH,
-        canvasW,
-        canvasH
+        -(col * pw),
+        -(row * ph),
+        boardWidth,
+        boardHeight
       );
+
       ctx.restore();
 
       ctx.strokeStyle = piece.isPlaced
@@ -101,7 +95,8 @@ export const PuzzlePieceCanvas: React.FC<PuzzlePieceCanvasProps> = ({
     } else {
       img.onload = draw;
     }
-  });
+    // 👉 쓸데없는 화면 깜빡임을 막기 위해 렌더링 최적화
+  }, [piece, imageUrl, boardWidth, boardHeight, canvasW, canvasH, col, row, pw, ph, tabW, tabH]);
 
   const left = piece.currentX - tabW;
   const top = piece.currentY - tabH;

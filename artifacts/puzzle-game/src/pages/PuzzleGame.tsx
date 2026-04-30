@@ -16,11 +16,21 @@ const SAMPLE_IMAGES = [
   { id: 'space', label: '우주', url: 'https://images.unsplash.com/photo-1464802686167-b939a6910659?w=800&h=450&fit=crop&auto=format', thumb: 'https://images.unsplash.com/photo-1464802686167-b939a6910659?w=200&h=120&fit=crop&auto=format' },
 ];
 
-function formatTime(s: number) {
-  const h = Math.floor(s / 3600), m = Math.floor((s % 3600) / 60), sec = s % 60;
-  if (h > 0) return `${h}시간 ${m}분 ${sec}초`;
-  if (m > 0) return `${m}분 ${sec}초`;
-  return `${sec}초`;
+// 👉 수정됨: 초 단위(s) 대신 밀리초(ms)를 받아서 0.01초 단위로 변환하는 함수
+function formatTime(ms: number) {
+  const totalSeconds = Math.floor(ms / 1000);
+  const centiSeconds = Math.floor((ms % 1000) / 10); // 0.01초 단위 추출
+
+  const h = Math.floor(totalSeconds / 3600);
+  const m = Math.floor((totalSeconds % 3600) / 60);
+  const s = totalSeconds % 60;
+
+  // 0.01초 자리가 항상 두 자리(예: .05)가 되도록 만듦
+  const cs = centiSeconds.toString().padStart(2, '0');
+
+  if (h > 0) return `${h}시간 ${m}분 ${s}.${cs}초`;
+  if (m > 0) return `${m}분 ${s}.${cs}초`;
+  return `${s}.${cs}초`;
 }
 
 function useViewport() {
@@ -118,7 +128,6 @@ async function fetchFromApi(pid: string): Promise<string> {
 
 export default function PuzzleGame() {
   const urlParams = useRef(getUrlParams());
-  // 👉 공유 링크(참가자)인지 확인하는 변수
   const isSharedLink = urlParams.current.autostart; 
 
   const [imageUrl, setImageUrl] = useState<string | null>(() => urlParams.current.img);
@@ -136,8 +145,11 @@ export default function PuzzleGame() {
   const [dragOver, setDragOver] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const [completedCount, setCompletedCount] = useState(0);
-  const [elapsedSeconds, setElapsedSeconds] = useState(0);
-  const [finalTime, setFinalTime] = useState(0);
+
+  // 👉 수정됨: 초 단위 대신 밀리초 단위로 상태 저장
+  const [elapsedTimeMs, setElapsedTimeMs] = useState(0);
+  const [finalTimeMs, setFinalTimeMs] = useState(0);
+
   const startTimeRef = useRef<number>(0);
   const timerRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const [showQr, setShowQr] = useState(false);
@@ -166,7 +178,6 @@ export default function PuzzleGame() {
   const vp = useViewport();
   const isLandscape = vp.w > vp.h;
 
-  // ── Board scale: wrapper div gets the scaled dimensions as layout size ──
   const refRowH = isLandscape ? 52 : 86;
   const gamePad = 12;
   const totalPlayH = BOARD_HEIGHT + trayHeight;
@@ -187,8 +198,9 @@ export default function PuzzleGame() {
   const startTimer = useCallback(() => {
     stopTimer();
     startTimeRef.current = Date.now();
-    setElapsedSeconds(0);
-    timerRef.current = setInterval(() => setElapsedSeconds(Math.floor((Date.now() - startTimeRef.current) / 1000)), 1000);
+    setElapsedTimeMs(0);
+    // 👉 수정됨: 1초(1000ms)가 아닌 0.01초(10ms)마다 타이머 업데이트
+    timerRef.current = setInterval(() => setElapsedTimeMs(Date.now() - startTimeRef.current), 10);
   }, [stopTimer]);
 
   useEffect(() => () => stopTimer(), [stopTimer]);
@@ -197,7 +209,7 @@ export default function PuzzleGame() {
     setImageUrl(url); setSelectedSampleId(sampleId ?? null);
     setGameStarted(false); setIsComplete(false);
     setPieces([]); setConfig(null);
-    stopTimer(); setElapsedSeconds(0);
+    stopTimer(); setElapsedTimeMs(0);
   }, [stopTimer]);
 
   const handleImageFile = useCallback((file: File) => {
@@ -228,7 +240,6 @@ export default function PuzzleGame() {
     startTimer();
   }, [imageUrl, selectedPieceCount, startTimer]);
 
-  // Handle URL params on mount
   useEffect(() => {
     const { img, pid, pieces: p, autostart } = urlParams.current;
     if (pid) {
@@ -247,17 +258,17 @@ export default function PuzzleGame() {
   }, []);
 
   const handleComplete = useCallback(() => {
-    const elapsed = Math.floor((Date.now() - startTimeRef.current) / 1000);
-    setFinalTime(elapsed); stopTimer(); setIsComplete(true);
+    const elapsed = Date.now() - startTimeRef.current;
+    setFinalTimeMs(elapsed); stopTimer(); setIsComplete(true);
   }, [stopTimer]);
 
   const handleNewGame = useCallback(() => {
-    setGameStarted(false); setIsComplete(false); stopTimer(); setElapsedSeconds(0);
+    setGameStarted(false); setIsComplete(false); stopTimer(); setElapsedTimeMs(0);
   }, [stopTimer]);
 
   useEffect(() => setCompletedCount(pieces.filter(p => p.isPlaced).length), [pieces]);
 
-  // ── Admin image upload ──
+  // Admin image upload
   const handleAdminFile = useCallback(async (file: File) => {
     if (!file.type.startsWith('image/')) return;
     setAdminCompressing(true); setAdminLink(''); setAdminSampleId(null); setAdminImageUrl('');
@@ -368,7 +379,7 @@ export default function PuzzleGame() {
   const totalPieces = config?.totalPieces ?? 0;
   const progress = totalPieces > 0 ? (completedCount / totalPieces) * 100 : 0;
 
-  // ── Loading / error screen ──
+  // Loading / error screen
   if (loading) {
     return (
       <div style={{ display: 'flex', height: '100vh', alignItems: 'center', justifyContent: 'center', flexDirection: 'column', gap: 16, background: 'linear-gradient(135deg, #0f1223, #1a1035)', color: '#c084fc' }}>
@@ -393,7 +404,7 @@ export default function PuzzleGame() {
   return (
     <div style={{ display: 'flex', flexDirection: 'column', height: '100vh', background: 'linear-gradient(135deg, #0f1223 0%, #1a1035 50%, #0f1223 100%)', overflow: 'hidden', fontFamily: 'var(--app-font-sans)', position: 'relative' }}>
 
-      {/* ── Header ── */}
+      {/* Header */}
       <div style={{ display: 'flex', alignItems: 'center', padding: '0 10px', height: HEADER_H, background: 'rgba(15,18,35,0.97)', borderBottom: '1px solid rgba(168,85,247,0.3)', gap: 8, flexShrink: 0, zIndex: 100 }}>
         <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
           <div style={{ width: 28, height: 28, borderRadius: '50%', background: 'linear-gradient(135deg, #a855f7, #7c3aed)', display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 13, boxShadow: '0 0 10px rgba(168,85,247,0.5)', flexShrink: 0 }}>🧩</div>
@@ -410,7 +421,9 @@ export default function PuzzleGame() {
             <div style={{ width: 1, height: 16, background: 'rgba(168,85,247,0.3)', flexShrink: 0 }} />
             <div style={{ display: 'flex', alignItems: 'center', gap: 3 }}>
               <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="rgba(168,85,247,0.85)" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>
-              <span style={{ color: '#c084fc', fontSize: 12, fontWeight: 700, fontVariantNumeric: 'tabular-nums', whiteSpace: 'nowrap' }}>{formatTime(elapsedSeconds)}</span>
+              <span style={{ color: '#c084fc', fontSize: 12, fontWeight: 700, fontVariantNumeric: 'tabular-nums', whiteSpace: 'nowrap' }}>
+                {formatTime(elapsedTimeMs)}
+              </span>
             </div>
           </>
         )}
@@ -429,13 +442,12 @@ export default function PuzzleGame() {
           </>
         )}
 
-        {/* 👉 공유 링크가 아닐 때만 새 게임 버튼 표시 */}
         {gameStarted && !isSharedLink && (
           <button onClick={handleNewGame} style={{ padding: '4px 10px', background: 'rgba(168,85,247,0.15)', border: '1px solid rgba(168,85,247,0.4)', borderRadius: 6, color: '#c084fc', fontSize: 12, fontWeight: 600, cursor: 'pointer' }}>새 게임</button>
         )}
       </div>
 
-      {/* ── QR panel ── */}
+      {/* QR panel */}
       {showQr && !gameStarted && (
         <div style={{ position: 'absolute', top: HEADER_H + 6, right: 10, zIndex: 200, background: 'rgba(20,15,40,0.98)', border: '1px solid rgba(168,85,247,0.4)', borderRadius: 12, padding: 14, display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 8, boxShadow: '0 8px 32px rgba(0,0,0,0.7)', minWidth: 160 }}>
           <span style={{ color: '#c084fc', fontSize: 11, fontWeight: 700 }}>모바일로 열기</span>
@@ -444,16 +456,14 @@ export default function PuzzleGame() {
         </div>
       )}
 
-      {/* ── Admin panel ── */}
+      {/* Admin panel */}
       {showAdmin && !gameStarted && (
         <div style={{ position: 'absolute', top: HEADER_H + 6, right: 10, zIndex: 200, background: 'rgba(20,15,40,0.99)', border: '1px solid rgba(168,85,247,0.45)', borderRadius: 14, padding: 16, display: 'flex', flexDirection: 'column', gap: 12, boxShadow: '0 12px 48px rgba(0,0,0,0.7)', width: 300, maxWidth: 'calc(100vw - 20px)', maxHeight: `calc(100vh - ${HEADER_H + 20}px)`, overflowY: 'auto' }}>
           <div style={{ color: '#e2d9f3', fontWeight: 700, fontSize: 13 }}>⚙️ 플레이어 링크 생성</div>
 
-          {/* Step 1: Image */}
           <div>
             <div style={{ color: 'rgba(255,255,255,0.55)', fontSize: 10, fontWeight: 700, marginBottom: 7, letterSpacing: '0.04em' }}>1단계 · 이미지</div>
 
-            {/* Upload zone */}
             <div onDrop={handleAdminDrop} onDragOver={e => { e.preventDefault(); setAdminDragOver(true); }} onDragLeave={() => setAdminDragOver(false)} onClick={() => adminFileRef.current?.click()}
               style={{ border: `2px dashed ${adminDragOver ? 'rgba(168,85,247,0.9)' : adminUploadPreview ? 'rgba(168,85,247,0.6)' : 'rgba(168,85,247,0.3)'}`, borderRadius: 9, padding: '9px 11px', cursor: 'pointer', background: adminDragOver ? 'rgba(168,85,247,0.1)' : 'rgba(15,18,35,0.5)', transition: 'all 0.15s', marginBottom: 7 }}>
               {adminCompressing ? (
@@ -504,7 +514,6 @@ export default function PuzzleGame() {
             )}
           </div>
 
-          {/* Step 2: Piece count */}
           <div>
             <div style={{ color: 'rgba(255,255,255,0.55)', fontSize: 10, fontWeight: 700, marginBottom: 7, letterSpacing: '0.04em' }}>2단계 · 피스 수</div>
             <div style={{ display: 'flex', flexWrap: 'wrap', gap: 4 }}>
@@ -517,7 +526,6 @@ export default function PuzzleGame() {
             </div>
           </div>
 
-          {/* Generate */}
           <button onClick={generateAdminLink} disabled={!adminHasImage || adminGenerating}
             style={{ padding: '9px', background: adminHasImage && !adminGenerating ? 'linear-gradient(135deg, #7c3aed, #a855f7)' : 'rgba(80,80,80,0.3)', border: 'none', borderRadius: 8, color: adminHasImage && !adminGenerating ? '#fff' : 'rgba(255,255,255,0.3)', fontSize: 12, fontWeight: 700, cursor: adminHasImage && !adminGenerating ? 'pointer' : 'not-allowed' }}>
             {adminGenerating ? '⏳ 생성 중...' : '🔗 플레이어 링크 생성'}
@@ -529,10 +537,8 @@ export default function PuzzleGame() {
             </div>
           )}
 
-          {/* Generated link + QR */}
           {adminLink && (
             <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
-              {/* QR code - only for short links */}
               {linkIsShort ? (
                 <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 6, padding: 10, background: 'rgba(168,85,247,0.07)', border: '1px solid rgba(168,85,247,0.2)', borderRadius: 9 }}>
                   <span style={{ color: 'rgba(255,255,255,0.5)', fontSize: 9, fontWeight: 700, letterSpacing: '0.06em', textTransform: 'uppercase' }}>QR 코드로 공유</span>
@@ -565,7 +571,6 @@ export default function PuzzleGame() {
             </div>
           )}
 
-          {/* ── 내가 만든 게임 목록 (영구 보관, 관리자만 삭제 가능) ── */}
           {adminHistory.length > 0 && (
             <div style={{ borderTop: '1px solid rgba(168,85,247,0.18)', paddingTop: 11, marginTop: 2 }}>
               <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 8 }}>
@@ -632,7 +637,7 @@ export default function PuzzleGame() {
       )}
 
       {!gameStarted ? (
-        /* ── Setup screen ── */
+        /* Setup screen */
         <div style={{ flex: 1, display: 'flex', alignItems: 'flex-start', justifyContent: 'center', padding: '12px 12px 28px', overflowY: 'auto' }}>
           <div style={{ width: '100%', maxWidth: 540, display: 'flex', flexDirection: 'column', gap: 14 }}>
 
@@ -698,10 +703,9 @@ export default function PuzzleGame() {
         </div>
 
       ) : (
-        /* ── Game screen ── */
+        /* Game screen */
         <div style={{ flex: 1, display: 'flex', flexDirection: 'column', alignItems: 'center', overflow: 'hidden', padding: `${isLandscape ? 4 : 6}px 8px ${isLandscape ? 2 : 4}px` }}>
 
-          {/* Reference image row - compact in landscape */}
           <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: isLandscape ? 4 : 6, flexShrink: 0 }}>
             <div style={{ position: 'relative', borderRadius: 6, overflow: 'hidden', border: '1px solid rgba(168,85,247,0.5)', boxShadow: '0 0 12px rgba(168,85,247,0.2)', flexShrink: 0 }}>
               <img
@@ -724,7 +728,6 @@ export default function PuzzleGame() {
             )}
           </div>
 
-          {/* ── Board wrapper: outer div = scaled layout dimensions ── */}
           {config && trayHeight > 0 && (
             <div
               style={{
@@ -756,7 +759,7 @@ export default function PuzzleGame() {
         </div>
       )}
 
-      {/* ── Completion overlay ── */}
+      {/* Completion overlay */}
       {isComplete && (
         <div style={{ position: 'fixed', inset: 0, display: 'flex', alignItems: 'center', justifyContent: 'center', background: 'rgba(0,0,0,0.75)', backdropFilter: 'blur(10px)', zIndex: 9999, padding: 16 }}>
           <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 16, padding: isLandscape ? '20px 36px' : '32px 44px', background: 'linear-gradient(135deg, rgba(20,15,40,0.99), rgba(30,20,60,0.99))', borderRadius: 20, border: '2px solid rgba(168,85,247,0.6)', boxShadow: '0 0 80px rgba(168,85,247,0.4)', textAlign: 'center', width: '100%', maxWidth: 300 }}>
@@ -767,13 +770,16 @@ export default function PuzzleGame() {
             </div>
             <div style={{ padding: '10px 20px', background: 'rgba(168,85,247,0.12)', border: '1px solid rgba(168,85,247,0.3)', borderRadius: 10, width: '100%' }}>
               <div style={{ color: 'rgba(255,255,255,0.4)', fontSize: 9, fontWeight: 600, letterSpacing: '0.08em', textTransform: 'uppercase', marginBottom: 4 }}>완성 시간</div>
-              <span style={{ color: '#e2d9f3', fontSize: isLandscape ? 20 : 24, fontWeight: 800, fontVariantNumeric: 'tabular-nums' }}>{formatTime(finalTime)}</span>
+
+              {/* 👉 수정됨: 최종 시간도 0.01초 단위로 표시 */}
+              <span style={{ color: '#e2d9f3', fontSize: isLandscape ? 20 : 24, fontWeight: 800, fontVariantNumeric: 'tabular-nums' }}>
+                {formatTime(finalTimeMs)}
+              </span>
             </div>
             <div style={{ display: 'flex', gap: 8, width: '100%' }}>
 
-              {/* 👉 공유 링크가 아닐 때만 새 이미지 버튼 표시 */}
               {!isSharedLink && (
-                <button onClick={() => { setGameStarted(false); setIsComplete(false); stopTimer(); setElapsedSeconds(0); }} style={{ flex: 1, padding: '9px', background: 'rgba(168,85,247,0.2)', border: '1px solid rgba(168,85,247,0.5)', borderRadius: 9, color: '#c084fc', fontSize: 13, fontWeight: 600, cursor: 'pointer' }}>새 이미지</button>
+                <button onClick={() => { setGameStarted(false); setIsComplete(false); stopTimer(); setElapsedTimeMs(0); }} style={{ flex: 1, padding: '9px', background: 'rgba(168,85,247,0.2)', border: '1px solid rgba(168,85,247,0.5)', borderRadius: 9, color: '#c084fc', fontSize: 13, fontWeight: 600, cursor: 'pointer' }}>새 이미지</button>
               )}
 
               <button onClick={() => startGame()} style={{ flex: 1, padding: '9px', background: 'linear-gradient(135deg, #7c3aed, #a855f7)', border: 'none', borderRadius: 9, color: '#fff', fontSize: 13, fontWeight: 700, cursor: 'pointer', boxShadow: '0 4px 16px rgba(168,85,247,0.5)' }}>다시 하기</button>
